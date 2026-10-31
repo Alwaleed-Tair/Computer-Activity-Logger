@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 **Computer Activity Logger** — a Bash-only tool that, with the user's explicit consent, runs in the background after login and logs process start/end times and durations to CSV files, then produces statistics and Excel-openable reports.
 
-**Status:** v0.4 — session logger, process monitor and activity analyzer implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
+**Status:** v0.5 — session logger, process monitor, activity analyzer and report generator implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
 
 ## Language
 
@@ -42,7 +42,7 @@ conf/              *.example lists (ignore.list, apps.map)
 data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
 state/             runtime state (git-ignored)
 install/           install.sh, uninstall.sh, systemd/autostart templates
-tests/             run_all.sh, test_sessions.sh, test_processes.sh, test_activity.sh, smoke.sh
+tests/             run_all.sh, test_sessions.sh, test_processes.sh, test_activity.sh, test_reports.sh, fixtures.sh, smoke.sh
 docs/              DESIGN.md
 ```
 
@@ -51,8 +51,9 @@ docs/              DESIGN.md
 ```bash
 bash tests/run_all.sh        # bash -n + shellcheck (if installed) + sandboxed smoke test
 bash tests/test_sessions.sh   # session logger tests (75 checks)
-bash tests/test_processes.sh  # process monitor tests (163 checks)
-bash tests/test_activity.sh   # activity analyzer tests (145 checks, known-answer dataset)
+bash tests/test_processes.sh  # process monitor tests (175 checks)
+bash tests/test_activity.sh   # activity analyzer tests (127 checks, known-answer dataset)
+bash tests/test_reports.sh    # report generator tests (213 checks; opens files in LibreOffice if installed)
 bash tests/smoke.sh          # smoke test only
 ./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
@@ -105,3 +106,14 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - `./main.sh stop` must always work: it waits `STOP_TIMEOUT_SEC`, then sends SIGKILL (safe: recovery closes the session at the next start).
 - When a test fails intermittently, find the cause before re-running: the failing run's log (`cal.log`, daemon state) is printed by `dump_diagnostics` in `tests/test_processes.sh`. A leftover daemon after the suite means something leaked.
 - A killed process can linger as a zombie (`Z`): `kill -0` still succeeds. Judge liveness by the lock (`daemon_is_running`) or `ps -o stat=`.
+
+## Report generator rules (lib/report.sh)
+
+- A report set = `session_report.csv`, `application_activity_report.csv`, `usage_summary_report.csv` + `report_manifest.csv`. Generate with `report_generate_set` only; never write into `reports/` any other way.
+- **Safe writing:** hold `reports/.report.lock`; build in a hidden staging dir on the same filesystem; `sync` + `mv -f` every file (atomic); **manifest last**. Never `>` straight into a published file.
+- **History:** a `FINAL` set is frozen (normal runs skip it). Replace it only for `--refresh` (if content changed) or `--force`, and ALWAYS archive the old files to `revisions/` first. The content fingerprint excludes `Report_Created_UTC` so an unchanged report keeps its creation date.
+- Excel rules enforced by `report_verify_dir`: UTF-8 BOM, CRLF, constant columns, balanced quotes, ISO dates, numbers as numbers, no unprotected `= + - @` cell (never write a cell like `+00:00`), cells <= 32,767 chars, <= `REPORT_MAX_ROWS` rows per file (else `_partN`).
+- **`read` at EOF empties every variable it was given.** Never use a variable you need after the loop as a `read` target (`while read ... M_FP _`) — copy it inside the body. This silently broke "don't replace unchanged reports" until a test caught it.
+- An `exit` inside an awk rule runs `END`, and an `exit` there replaces the status: set a flag, `exit` once in `END`.
+- `main_valid_date` must reject impossible dates (round-trip check); don't validate dates by pattern alone.
+- Test hooks: `CAL_NOW_EPOCH` pins the clock, `CAL_TEST_ABORT_AFTER_FILES=N` simulates a crash while publishing. Don't run two test suites at the same time on one machine (the monitor sees the other's processes).

@@ -44,7 +44,8 @@
 
 ACT_FROM="" ACT_TO="" ACT_OFFSET=0
 ACT_FROM_TS=0 ACT_TO_TS=4102444800        # 2100-01-01: "no upper bound"
-ACT_ROWS=""                               # normalised process rows ("R"/"Q" lines)
+ACT_ROWS_RAW="" ACT_SESS_RAW=""            # loaded rows, independent of any period
+ACT_ROWS=""                               # process rows with the current period applied ("R"/"Q" lines)
 ACT_SESS=""                               # normalised session rows ("S"/"Q" lines)
 
 # --- small helpers -------------------------------------------------------------
@@ -63,32 +64,75 @@ _act_union() {
         END { flush() }'
 }
 
-# activity_prepare FROM TO OFFSET_SECONDS — load and validate the data once.
-# Must be called before any other activity_* function.
-activity_prepare() {
+# activity_load — the HEAVY step: parse and validate the CSV files once. Independent
+# of any period, so a report run for many days parses the logs a single time.
+activity_load() {
+    ACT_ROWS_RAW=$(_act_load_processes)
+    ACT_SESS_RAW=$(_act_load_sessions)
+}
+
+# activity_set_period FROM TO OFFSET_SECONDS — the LIGHT step: decide, for the loaded
+# rows, what belongs to the period (counted / clipped interval / day). May be called
+# many times after one activity_load.
+activity_set_period() {
     local from=${1-} to=${2-} off=${3:-0} e
     ACT_FROM=$from; ACT_TO=$to; ACT_OFFSET=$off
     ACT_FROM_TS=0; ACT_TO_TS=4102444800
     if [[ -n $from ]] && common_utc_to_epoch e "$from" "00:00:00"; then ACT_FROM_TS=$(( e - off )); fi
     if [[ -n $to ]] && common_utc_to_epoch e "$to" "00:00:00"; then ACT_TO_TS=$(( e + 86400 - off )); fi
-    ACT_ROWS=$(_act_load_processes)
-    ACT_SESS=$(_act_load_sessions)
+    ACT_ROWS=$(_act_lines "$ACT_ROWS_RAW" | _act_apply_period)
+    ACT_SESS=$(_act_lines "$ACT_SESS_RAW" | _act_apply_period)
 }
 
-# --- loaders: validate, normalise, clip --------------------------------------------
+# activity_prepare FROM TO OFFSET_SECONDS — load and apply the period in one go.
+# Must be called (or activity_load + activity_set_period) before any other activity_* function.
+activity_prepare() {
+    activity_load
+    activity_set_period "$@"
+}
+
+# _act_apply_period — stdin: R/S/Q lines from the loaders. Recomputes, for the current
+# period, the fields that depend on it (R: 13 counted, 14 cs, 15 ce, 16 day;
+# S: 7 counted, 8 cs, 9 ce, 10 day). `counted` = it STARTED inside the period;
+# cs..ce is the part of its life that counts as usage: clipped to the period and, for
+# processes found already running, to the moment monitoring first saw them.
+_act_apply_period() {
+    LC_ALL=C awk -F'\t' -v OFS='\t' -v off="$ACT_OFFSET" -v from_ts="$ACT_FROM_TS" -v to_ts="$ACT_TO_TS" "$AWK_LIB"'
+        $1 == "R" {
+            s = $10; e = $11; cs = s; ce = e
+            if ($5 == "yes" && $21 > cs) cs = $21             # only the monitored part of a pre-existing process
+            if (cs < from_ts) cs = from_ts
+            if (ce > to_ts) ce = to_ts
+            if (ce <= cs) { cs = 0; ce = 0 }
+            $13 = (s >= from_ts && s < to_ts) ? 1 : 0
+            $14 = sprintf("%.0f", cs); $15 = sprintf("%.0f", ce); $16 = daykey(s, off)
+            print; next
+        }
+        $1 == "S" {
+            ls = $4; dur = $6; cs = ls; ce = (dur >= 0) ? ls + dur : ls
+            if (cs < from_ts) cs = from_ts
+            if (ce > to_ts) ce = to_ts
+            if (ce <= cs) { cs = 0; ce = 0 }
+            $7 = (ls >= from_ts && ls < to_ts) ? 1 : 0
+            $8 = sprintf("%.0f", cs); $9 = sprintf("%.0f", ce); $10 = daykey(ls, off)
+            print; next
+        }
+        { print }'
+}
+
+# --- loaders: validate and normalise (period-independent) ----------------------------
 
 # _act_load_processes — join processes.csv with process_details.csv and emit
-#   R  app class root pre status session pid name start end dur counted cs ce day instance cpu start_str end_str
+#   R  app class root pre status session pid name start end dur counted cs ce day instance cpu start_str end_str det
 #   Q  reason count                       (data-quality counters)
-# `counted`=1 when the process STARTED inside the period. cs..ce is the part of
-# its life that counts as usage: clipped to the period and, for processes found
-# already running, to the moment monitoring first saw them.
+# Fields 13-16 (counted, cs, ce, day) are placeholders here: _act_apply_period fills them.
+# `det` (21) = epoch at which monitoring first saw the process (-1 if unknown).
 _act_load_processes() {
     local -a files=()
     if [[ -s $PROCESS_DETAILS_FILE ]]; then files+=("$PROCESS_DETAILS_FILE"); fi
     if [[ -s $PROCESSES_FILE ]]; then files+=("$PROCESSES_FILE"); fi
     if (( ${#files[@]} == 0 )); then return 0; fi
-    LC_ALL=C awk -v off="$ACT_OFFSET" -v from_ts="$ACT_FROM_TS" -v to_ts="$ACT_TO_TS" -v pfile="$PROCESSES_FILE" "$AWK_LIB"'
+    LC_ALL=C awk -v pfile="$PROCESSES_FILE" "$AWK_LIB"'
         function clean(s) { gsub(/[\t\r\n]/, " ", s); return s }
         FNR == 1 { next }
         FILENAME != pfile {                                           # ---- process_details.csv
@@ -121,14 +165,8 @@ _act_load_processes() {
             if (k in dcls) { cl = dcls[k]; ap = dapp[k]; rt = droot[k]; pre = dpre[k]; ins = dinst[k]; cpu = dcpu[k]; det = ddet[k] }
             else { q["process_rows_without_details"]++; cl = "Unknown"; ap = f[3]; rt = "yes"; pre = "unknown"; ins = "u-" f[2] "-" s; cpu = 0; det = -1 }
             if (cl != "User_Application" && cl != "Background_Process") cl = "Unknown"
-            cs = s; ce = e
-            if (pre == "yes" && det > cs) cs = det            # only the monitored part of a pre-existing process
-            if (cs < from_ts) cs = from_ts
-            if (ce > to_ts) ce = to_ts
-            if (ce <= cs) { cs = 0; ce = 0 }
-            counted = (s >= from_ts && s < to_ts) ? 1 : 0
-            printf "R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%.0f\t%d\t%.0f\t%.0f\t%s\t%s\t%.0f\t%s\t%s\n",
-                clean(ap), cl, rt, pre, st, f[1], f[2], clean(f[3]), s, e, dur, counted, cs, ce, daykey(s, off), clean(ins), cpu, fmt_ts(s), fmt_ts(e)
+            printf "R\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.0f\t%.0f\t%.0f\t0\t0\t0\t-\t%s\t%.0f\t%s\t%s\t%.0f\n",
+                clean(ap), cl, rt, pre, st, f[1], f[2], clean(f[3]), s, e, dur, clean(ins), cpu, fmt_ts(s), fmt_ts(e), det
         }
         END {
             for (k in dseen) if (!(k in pseen)) q["details_rows_without_process_row"]++
@@ -137,10 +175,11 @@ _act_load_processes() {
 }
 
 # _act_load_sessions — sessions.csv normalised:
-#   S  id user login_epoch status duration(-1 = unknown) counted cs ce day login_str logout_str
+#   S  id user login_epoch status duration(-1 = unknown) counted cs ce day login_str logout_str uid
+# Fields 7-10 are placeholders here: _act_apply_period fills them.
 _act_load_sessions() {
     if [[ ! -s $SESSIONS_FILE ]]; then return 0; fi
-    LC_ALL=C awk -v off="$ACT_OFFSET" -v from_ts="$ACT_FROM_TS" -v to_ts="$ACT_TO_TS" "$AWK_LIB"'
+    LC_ALL=C awk "$AWK_LIB"'
         function clean(s) { gsub(/[\t\r\n]/, " ", s); return s }
         FNR == 1 { next }
         {
@@ -161,13 +200,8 @@ _act_load_sessions() {
                     else q["session_closed_without_usable_duration"]++
                 }
             }
-            cs = ls; ce = (dur >= 0) ? ls + dur : ls
-            if (cs < from_ts) cs = from_ts
-            if (ce > to_ts) ce = to_ts
-            if (ce <= cs) { cs = 0; ce = 0 }
-            counted = (ls >= from_ts && ls < to_ts) ? 1 : 0
-            printf "S\t%s\t%s\t%.0f\t%s\t%.0f\t%d\t%.0f\t%.0f\t%s\t%s\t%s\n",
-                clean(id), clean(f[2]), ls, st, dur, counted, cs, ce, daykey(ls, off), fmt_ts(ls), (dur >= 0 ? fmt_ts(ls + dur) : "")
+            printf "S\t%s\t%s\t%.0f\t%s\t%.0f\t0\t0\t0\t-\t%s\t%s\t%s\n",
+                clean(id), clean(f[2]), ls, st, dur, fmt_ts(ls), (dur >= 0 ? fmt_ts(ls + dur) : ""), clean(f[3])
         }
         END { for (r in q) printf "Q\t%s\t%d\n", r, q[r] }' "$SESSIONS_FILE"
 }
@@ -286,58 +320,90 @@ activity_daily() {
 
 # --- Sessions ----------------------------------------------------------------------
 
-# activity_sessions — one row per session with its process totals.
+# activity_sessions [INCLUDE_MISSING] — one row per session of the period, oldest first.
+# A session belongs to the period if it STARTED in it or ran during it (a session that
+# began yesterday and ended today shows up in both days; Started_In_Period tells which,
+# and Seconds_In_Period is its share of the period, so those seconds add up exactly).
 #   Duration_Quality: EXACT (clean close) · ESTIMATED (crash / power loss: end =
 #   last heartbeat) · UNKNOWN (still ACTIVE, or INTERRUPTED with no end known).
-#   Processes are attributed by Session_ID (the session in which they were first
-#   seen). Process Session_IDs that have no session row appear as MISSING_SESSION.
+#   The process columns are session totals (all days), attributed by Session_ID — the
+#   session in which a process was first seen. With INCLUDE_MISSING=1 (default) process
+#   Session_IDs that have no session row appear as MISSING_SESSION.
 activity_sessions() {
-    printf 'Session_ID,Login_UTC,Logout_UTC,Status,Duration_Quality,Duration_Seconds,Duration_Minutes,Duration_HMS,Processes,User_App_Launches,Background_Processes,Completed_Processes,Incomplete_Processes,Distinct_User_Apps\n'
+    local missing=${1:-1}
+    printf 'Session_ID,Username,User_ID,Login_UTC,Logout_UTC,Status,Duration_Quality,Duration_Seconds,Duration_Minutes,Duration_HMS,Seconds_In_Period,Started_In_Period,Processes,User_App_Launches,Background_Processes,Completed_Processes,Incomplete_Processes,Distinct_User_Apps\n'
     {
-        _act_lines "$ACT_SESS" | LC_ALL=C awk -F'\t' '$1 == "S" && $7 == 1'
+        _act_lines "$ACT_SESS" | LC_ALL=C awk -F'\t' '$1 == "S" && ($7 == 1 || $9 > $8)'
         _act_lines "$ACT_ROWS" | LC_ALL=C awk -F'\t' '$1 == "R"'
-    } | LC_ALL=C awk -F'\t' "$AWK_LIB"'
-        $1 == "S" { sid[$2] = 1; order[$2] = $4; st[$2] = $5; dur[$2] = $6; li[$2] = $11; lo[$2] = $12 }
+    } | LC_ALL=C awk -F'\t' -v missing="$missing" "$AWK_LIB"'
+        $1 == "S" { sid[$2] = 1; order[$2] = $4; st[$2] = $5; dur[$2] = $6; inp[$2] = $7; cs[$2] = $8; ce[$2] = $9
+                    li[$2] = $11; lo[$2] = $12; who[$2] = $3; uid[$2] = $13 }
         $1 == "R" {
-            s = $7; used[s] = 1
-            if ($13 == 1 || ($7 in sid)) {
-                np[s]++
-                if ($3 == "User_Application" && $4 == "yes" && $5 == "no") launch[s]++
-                if ($3 == "Background_Process") bg[s]++
-                if ($6 == "COMPLETED") comp[s]++; else inc[s]++
-                if ($3 == "User_Application") apps[s SUBSEP $2] = 1
-            }
+            s = $7; rows[NR] = $0
+            if ($13 == 1) used[s] = 1
+            held[NR] = 1
         }
         END {
+            # second pass over the process rows now that the session set is known
+            for (n in rows) {
+                split(rows[n], r, "\t"); s = r[7]
+                if (s in sid || (r[13] == 1 && !(s in sid))) {
+                    np[s]++
+                    if (r[3] == "User_Application" && r[4] == "yes" && r[5] == "no") launch[s]++
+                    if (r[3] == "Background_Process") bg[s]++
+                    if (r[6] == "COMPLETED") comp[s]++; else inc[s]++
+                    if (r[3] == "User_Application") apps[s SUBSEP r[2]] = 1
+                }
+            }
             for (k in apps) { split(k, kk, SUBSEP); napps[kk[1]]++ }
             for (s in sid) {
                 q = (st[s] ~ /^(COMPLETED|ABORTED)$/) ? "EXACT" : (st[s] ~ /^(CRASHED|POWER_LOSS)$/) ? "ESTIMATED" : "UNKNOWN"
                 d = dur[s]
-                printf "%.0f\t%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d\n", order[s], idq(s), li[s], lo[s], st[s], q,
+                printf "%.0f\t%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d\n", order[s], idq(s), csvq(who[s]), (uid[s] ~ /^[0-9]+$/ ? uid[s] : ""), li[s], lo[s], st[s], q,
                     (d >= 0 ? sprintf("%.0f", d) : ""), (d >= 0 ? sprintf("%d.%02d", d / 60, (d % 60) * 100 / 60) : ""), (d >= 0 ? hms(d) : ""),
+                    (d >= 0 ? sprintf("%.0f", (ce[s] > cs[s]) ? ce[s] - cs[s] : 0) : ""), (inp[s] == 1 ? "yes" : "no"),
                     np[s], launch[s], bg[s], comp[s], inc[s], napps[s]
             }
-            for (s in used) if (!(s in sid) && np[s] > 0)
-                printf "99999999999\t%s,,,MISSING_SESSION,UNKNOWN,,,,%d,%d,%d,%d,%d,%d\n", idq(s), np[s], launch[s], bg[s], comp[s], inc[s], napps[s]
+            if (missing == 1)
+                for (s in used) if (!(s in sid) && np[s] > 0)
+                    printf "99999999999\t%s,,,,,MISSING_SESSION,UNKNOWN,,,,,yes,%d,%d,%d,%d,%d,%d\n", idq(s), np[s], launch[s], bg[s], comp[s], inc[s], napps[s]
         }' | LC_ALL=C sort -t $'\t' -k1,1n -k2,2 | cut -f2-
+}
+
+# activity_days — every calendar day (at the current UTC offset) on which something
+# happened: a session or process started, or was running. Sorted, unique.
+# Works on the loaded data, whatever period is currently set.
+activity_days() {
+    {
+        _act_lines "$ACT_SESS_RAW" | LC_ALL=C awk -F'\t' -v off="$ACT_OFFSET" "$AWK_LIB"'
+            $1 == "S" { print daykey($4, off); if ($6 > 0) { n = day_segments($4, $4 + $6, off); for (i = 1; i <= n; i++) print segd[i] } }'
+        _act_lines "$ACT_ROWS_RAW" | LC_ALL=C awk -F'\t' -v off="$ACT_OFFSET" "$AWK_LIB"'
+            $1 == "R" { a = ($5 == "yes" && $21 > $10) ? $21 : $10; print daykey($10, off); n = day_segments(a, $11, off); for (i = 1; i <= n; i++) print segd[i] }'
+    } | LC_ALL=C sort -u
 }
 
 # --- Per-process durations ----------------------------------------------------------
 
-# activity_processes — the duration of every process that started in the period.
+# activity_processes — one row per process of the period, oldest start first. A process
+# belongs to the period if it STARTED in it or was running during it; Started_In_Period
+# says which, and Seconds_In_Period is its share of the period (for a process that was
+# already running when monitoring began, only the monitored part counts).
 #   Natural_End = yes only for COMPLETED. For the others Duration_Seconds is a
 #   lower bound (SESSION_END) or an estimate (RECOVERED), and Note says so.
+#   Is_Group_Root = yes for the process that started the application instance (helpers
+#   such as browser renderers are "no").
 activity_processes() {
-    printf 'Session_ID,PID,Process_Name,Application,Class,Start_Time_UTC,End_Time_UTC,Duration_Seconds,Duration_HMS,Status,Natural_End,Started_Before_Monitoring,Note\n'
+    printf 'Session_ID,PID,Process_Name,Application,Class,Is_Group_Root,Start_Time_UTC,End_Time_UTC,Duration_Seconds,Duration_HMS,Seconds_In_Period,Started_In_Period,Status,Natural_End,Started_Before_Monitoring,CPU_Seconds,Note\n'
     LC_ALL=C awk -F'\t' "$AWK_LIB"'
-        $1 == "R" && $13 == 1 {
+        $1 == "R" && ($13 == 1 || $15 > $14) {
             note = ""
             if ($6 == "SESSION_END") note = "still running when monitoring stopped: duration is a lower bound"
             else if ($6 == "RECOVERED") note = "monitor had died: end time is an estimate (last heartbeat)"
             else if ($6 == "UNKNOWN") note = "unrecognised status: treated as incomplete"
             if ($5 == "yes") note = note (note != "" ? "; " : "") "already running when monitoring began (true start shown)"
-            printf "%.0f\t%d\t%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%s\n", $10, $8, idq($7), $8, csvq($9), csvq($2), $3, $19, $20, $12, hms($12), $6,
-                ($6 == "COMPLETED" ? "yes" : "no"), ($5 == "yes" ? "yes" : ($5 == "no" ? "no" : "unknown")), csvq(note)
+            printf "%.0f\t%d\t%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%.0f,%s,%s,%s,%s,%d,%s\n", $10, $8, idq($7), $8, csvq($9), csvq($2), $3, $4, $19, $20, $12, hms($12),
+                ($15 > $14 ? $15 - $14 : 0), ($13 == 1 ? "yes" : "no"), $6, ($6 == "COMPLETED" ? "yes" : "no"),
+                ($5 == "yes" ? "yes" : ($5 == "no" ? "no" : "unknown")), $18, csvq(note)
         }' <<<"$ACT_ROWS" | LC_ALL=C sort -t $'\t' -k1,1n -k2,2n | cut -f3-
 }
 

@@ -12,7 +12,7 @@
 : "${CAL_ROOT:?config.sh must be sourced from main.sh (CAL_ROOT is not set)}"
 
 # --- Identity / version ------------------------------------------------------
-CAL_VERSION="0.3.0"
+CAL_VERSION="0.5.0"
 CAL_USER="${CAL_USER:-$(whoami)}"   # current user name (whoami)
 CAL_UID="${CAL_UID:-$EUID}"                # numeric user id (UID)
 CAL_HOST="${CAL_HOST:-$(hostname 2>/dev/null || echo unknown)}"
@@ -63,6 +63,12 @@ STOP_TIMEOUT_SEC="${STOP_TIMEOUT_SEC:-10}"
 SESSIONS_FILE="${SESSIONS_FILE:-$DATA_DIR/sessions.csv}"
 SESSIONS_LOCK="${SESSIONS_LOCK:-$DATA_DIR/.sessions.lock}"
 
+# --- Reports -----------------------------------------------------------------
+# Excel stops at 1,048,576 rows per sheet. Longer reports are split into _part1, _part2...
+REPORT_MAX_ROWS="${REPORT_MAX_ROWS:-1000000}"
+REPORT_TOP="${REPORT_TOP:-20}"                         # rows in the "most used applications" list
+REPORT_UTC_OFFSET_SEC="${REPORT_UTC_OFFSET_SEC:-0}"    # day boundaries of reports (0 = UTC; 10800 = +03:00)
+
 # --- Process log -------------------------------------------------------------
 # processes.csv         : exactly 8 columns, one row per finished process
 #                         (Session_ID,PID,Process_Name,Username,Start_Time,End_Time,
@@ -98,6 +104,14 @@ config_validate() {
     fi
     if ! [[ $MIN_DURATION_SEC =~ ^[0-9]+$ ]]; then
         echo "config: MIN_DURATION_SEC must be a non-negative integer (got '$MIN_DURATION_SEC')" >&2
+        ok=1
+    fi
+    if ! [[ $REPORT_MAX_ROWS =~ ^[0-9]+$ ]] || (( REPORT_MAX_ROWS < 2 || REPORT_MAX_ROWS > 1048575 )); then
+        echo "config: REPORT_MAX_ROWS must be between 2 and 1048575 (got '$REPORT_MAX_ROWS')" >&2
+        ok=1
+    fi
+    if ! [[ $REPORT_TOP =~ ^[0-9]+$ ]] || ! [[ $REPORT_UTC_OFFSET_SEC =~ ^-?[0-9]+$ ]] || (( REPORT_UTC_OFFSET_SEC > 50400 || REPORT_UTC_OFFSET_SEC < -50400 )); then
+        echo "config: REPORT_TOP must be a number and REPORT_UTC_OFFSET_SEC within +-50400" >&2
         ok=1
     fi
     if ! [[ $STOP_TIMEOUT_SEC =~ ^[0-9]+$ ]] || (( STOP_TIMEOUT_SEC < 1 )); then

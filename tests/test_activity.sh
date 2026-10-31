@@ -62,61 +62,8 @@ for m in common consent storage sessionlog collector detector session recovery d
 done
 storage_init
 
-# --- fixture builders (they write raw CSV exactly as the logger would) ---------------
-ep() { date -u -d "$1" +%s; }
-mk_files() {   # fresh headers
-    rm -f -- "$SESSIONS_FILE" "$PROCESSES_FILE" "$PROCESS_DETAILS_FILE"
-    printf '\xEF\xBB\xBF%s\n' "$SESSIONS_HEADER" >"$SESSIONS_FILE"
-    printf '\xEF\xBB\xBF%s\n' "$PROCESSES_HEADER" >"$PROCESSES_FILE"
-    printf '\xEF\xBB\xBF%s\n' "$DETAILS_HEADER" >"$PROCESS_DETAILS_FILE"
-}
-mk_session() {   # ID LOGIN LOGOUT DURATION STATUS      ("" logout/duration for open sessions)
-    local ld=${2%% *} lt=${2##* } od="" ot=""
-    if [[ -n $3 ]]; then od=${3%% *}; ot=${3##* }; fi
-    printf '%s,"tester",1000,%s,%s,%s,%s,%s,%s\n' "$1" "$ld" "$lt" "$od" "$ot" "$4" "$5" >>"$SESSIONS_FILE"
-}
-mk_proc() {   # SID PID NAME START END STATUS CLASS APP ROOT PRE INST [DETECTED_START] [DURATION_FIELD] [no-details]
-    local sid=$1 pid=$2 name=$3 start=$4 end=$5 status=$6 class=$7 app=$8 root=$9 pre=${10} inst=${11}
-    local det=${12:-$4} durf=${13:-} nodet=${14:-} s e dur
-    name=${name//\"/\"\"}; app=${app//\"/\"\"}      # CSV-escape embedded quotes
-    s=$(ep "$start"); e=$(ep "$end"); dur=$(( e - s ))
-    printf '%s,%s,"%s","tester",%s,%s,%s,%s\n' "$sid" "$pid" "$name" "$start" "$end" "${durf:-$dur}" "$status" >>"$PROCESSES_FILE"
-    if [[ $nodet != no-details ]]; then
-        printf '%s,%s,%s,1,"%s",%s,"%s",%s,%s,%s,%s,%s,0,0,0.0,1000,1000,"cat",%s,%s\n' \
-            "$sid" "$pid" "$start" "$name" "$class" "$app" "$inst" "$root" "$pre" "$det" "$end" "$s" "$e" >>"$PROCESS_DETAILS_FILE"
-    fi
-}
-UA=User_Application; BG=Background_Process
-build_dataset() {
-    mk_files
-    mk_session S1 "2026-10-01 09:00:00" "2026-10-01 11:00:00" 7200 COMPLETED
-    mk_session S2 "2026-10-01 23:30:00" "2026-10-02 00:30:00" 3600 COMPLETED
-    mk_session S3 "2026-10-02 08:00:00" "2026-10-02 08:50:00" 3000 CRASHED
-    mk_session S4 "2026-10-03 10:00:00" "" "" ACTIVE
-    mk_session S5 "2026-10-03 12:00:00" "" "" INTERRUPTED
-    mk_proc S1  101 browserx       "2026-10-01 09:10:00" "2026-10-01 10:10:00" COMPLETED   $UA "Browser X" yes no  i1
-    mk_proc S1  102 "Web Content"  "2026-10-01 09:12:00" "2026-10-01 09:42:00" COMPLETED   $UA "Browser X" no  no  i1
-    mk_proc S1  103 gpuhelper      "2026-10-01 10:00:00" "2026-10-01 10:30:00" COMPLETED   $UA "Browser X" no  no  i1
-    mk_proc S1  104 editorx        "2026-10-01 09:30:00" "2026-10-01 10:00:00" COMPLETED   $UA "Editor X"  yes no  i2
-    mk_proc S1  105 svc            "2026-10-01 08:00:00" "2026-10-01 11:00:00" SESSION_END $BG "svc"       yes yes i5 "2026-10-01 09:00:05"
-    mk_proc S1  106 browserx       "2026-10-01 10:45:00" "2026-10-01 10:55:00" COMPLETED   $UA "Browser X" yes no  i3
-    mk_proc S2  107 editorx        "2026-10-01 23:45:00" "2026-10-02 00:15:00" COMPLETED   $UA "Editor X"  yes no  i4
-    mk_proc S3  108 browserx       "2026-10-02 08:05:00" "2026-10-02 08:35:00" RECOVERED   $UA "Browser X" yes no  i6
-    mk_proc S3  109 worker         "2026-10-02 08:10:00" "2026-10-02 08:12:00" COMPLETED   $BG "worker"    yes no  i7
-    mk_proc SX  110 ghost          "2026-10-01 12:00:00" "2026-10-01 12:10:00" COMPLETED   $UA "Ghost"     yes no  i8
-    mk_proc S3  111 mystery        "2026-10-02 09:00:00" "2026-10-02 09:00:30" COMPLETED   $UA "mystery"   yes no  i10 "" "" no-details
-    mk_proc S1  112 calc           "2026-10-01 10:30:00" "2026-10-01 10:31:40" COMPLETED   $BG "calc"      yes no  i9  "" abc
-    # damaged / duplicated / orphan lines
-    echo 'S1,113,"bad"' >>"$PROCESSES_FILE"                                                       # wrong field count
-    dup_line=$(grep ',104,"editorx"' "$PROCESSES_FILE"); printf '%s\n' "$dup_line" >>"$PROCESSES_FILE"      # exact duplicate of P4
-    echo 'S1,114,"garbage","tester",not-a-date,2026-10-01 10:00:00,5,COMPLETED' >>"$PROCESSES_FILE" # unreadable Start_Time
-    echo 'S1,999,2026-10-01 09:59:00,1,"orph",Background_Process,"orph",i99,yes,no,2026-10-01 09:59:00,2026-10-01 10:00:00,0,0,0.0,1,1,"cat",1,2' >>"$PROCESS_DETAILS_FILE"
-}
-checksums() { sha256sum "$SESSIONS_FILE" "$PROCESSES_FILE" "$PROCESS_DETAILS_FILE" 2>/dev/null | awk '{print $1}' | paste -sd' '; }
-# csv_field FILE_OR_TEXT KEYCOL KEY COL — first matching row's COL (csv-aware via awk)
-cell() {   # TEXT KEYCOL KEY COL
-    awk "$AWK_LIB"'{ n = csv_split($0, f); if (f[kc] == k) { print f[c]; exit } }' kc="$2" k="$3" c="$4" <<<"$1"
-}
+# shellcheck source=tests/fixtures.sh
+source "$ROOT/tests/fixtures.sh"
 
 # =============================================================================
 section "1. date arithmetic used by the analyzer (awk, no mktime)"
@@ -168,14 +115,14 @@ section "4. incomplete data is not presented as a normal result"
 expect_eq "SESSION_END process is not in the average (avg would differ)" "1225.0" "$(m Average_Process_Duration_Seconds)"
 procs=$(activity_processes)
 expect_eq "per-process list has all 12 rows" "12" "$(( $(grep -c '' <<<"$procs") - 1 ))"
-expect_eq "P5 (SESSION_END): Natural_End = no" "no" "$(cell "$procs" 2 105 11)"
-expect_eq "P8 (RECOVERED): Natural_End = no" "no" "$(cell "$procs" 2 108 11)"
-expect_eq "P1 (COMPLETED): Natural_End = yes" "yes" "$(cell "$procs" 2 101 11)"
-case $(cell "$procs" 2 105 13) in *"lower bound"*"already running"*) pass "P5 note explains: lower bound + found running" ;; *) fail "P5 note" "$(cell "$procs" 2 105 13)" ;; esac
-case $(cell "$procs" 2 108 13) in *estimate*) pass "P8 note explains: estimated end" ;; *) fail "P8 note" "$(cell "$procs" 2 108 13)" ;; esac
-expect_eq "P5 keeps its real duration (08:00-11:00 = 10800)" "10800" "$(cell "$procs" 2 105 8)"
-expect_eq "P12 duration recomputed from its times (field was 'abc')" "100" "$(cell "$procs" 2 112 8)"
-expect_eq "P2 duration" "1800" "$(cell "$procs" 2 102 8)"
+expect_eq "P5 (SESSION_END): Natural_End = no" "no" "$(cell "$procs" 2 105 14)"
+expect_eq "P8 (RECOVERED): Natural_End = no" "no" "$(cell "$procs" 2 108 14)"
+expect_eq "P1 (COMPLETED): Natural_End = yes" "yes" "$(cell "$procs" 2 101 14)"
+case $(cell "$procs" 2 105 17) in *"lower bound"*"already running"*) pass "P5 note explains: lower bound + found running" ;; *) fail "P5 note" "$(cell "$procs" 2 105 17)" ;; esac
+case $(cell "$procs" 2 108 17) in *estimate*) pass "P8 note explains: estimated end" ;; *) fail "P8 note" "$(cell "$procs" 2 108 17)" ;; esac
+expect_eq "P5 keeps its real duration (08:00-11:00 = 10800)" "10800" "$(cell "$procs" 2 105 9)"
+expect_eq "P12 duration recomputed from its times (field was 'abc')" "100" "$(cell "$procs" 2 112 9)"
+expect_eq "P2 duration" "1800" "$(cell "$procs" 2 102 9)"
 
 section "5. applications: ranking, launches, grouping, totals, averages"
 apps=$(activity_apps User_Application 10)
@@ -194,14 +141,14 @@ expect_eq "top N limits the list" "2" "$(( $(activity_apps User_Application 2 | 
 
 section "6. per-session totals"
 sess=$(activity_sessions)
-expect_eq "header" "Session_ID,Login_UTC,Logout_UTC,Status,Duration_Quality,Duration_Seconds,Duration_Minutes,Duration_HMS,Processes,User_App_Launches,Background_Processes,Completed_Processes,Incomplete_Processes,Distinct_User_Apps" "$(head -n1 <<<"$sess")"
-expect_eq "S1: 7 processes (3 launches, 2 background, 6 completed, 1 incomplete, 2 apps)" 'S1,2026-10-01 09:00:00,2026-10-01 11:00:00,COMPLETED,EXACT,7200,120.00,02:00:00,7,3,2,6,1,2' "$(grep '^S1,' <<<"$sess")"
-expect_eq "S2 (crosses midnight): 1 process" 'S2,2026-10-01 23:30:00,2026-10-02 00:30:00,COMPLETED,EXACT,3600,60.00,01:00:00,1,1,0,1,0,1' "$(grep '^S2,' <<<"$sess")"
-expect_eq "S3 (crash): duration is ESTIMATED; includes the no-details process" 'S3,2026-10-02 08:00:00,2026-10-02 08:50:00,CRASHED,ESTIMATED,3000,50.00,00:50:00,3,1,1,2,1,1' "$(grep '^S3,' <<<"$sess")"
-expect_eq "S4 ACTIVE: no duration, zero processes" 'S4,2026-10-03 10:00:00,,ACTIVE,UNKNOWN,,,,0,0,0,0,0,0' "$(grep '^S4,' <<<"$sess")"
-expect_eq "S5 INTERRUPTED: no duration" 'S5,2026-10-03 12:00:00,,INTERRUPTED,UNKNOWN,,,,0,0,0,0,0,0' "$(grep '^S5,' <<<"$sess")"
-expect_eq "process whose session row is missing is reported, not lost" 'SX,,,MISSING_SESSION,UNKNOWN,,,,1,1,0,1,0,1' "$(grep '^SX,' <<<"$sess")"
-expect_eq "sum of per-session process counts equals Total Processes" "12" "$(tail -n +2 <<<"$sess" | awk "$AWK_LIB"'{ csv_split($0, f); s += f[9] } END { print s }')"
+expect_eq "header" "Session_ID,Username,User_ID,Login_UTC,Logout_UTC,Status,Duration_Quality,Duration_Seconds,Duration_Minutes,Duration_HMS,Seconds_In_Period,Started_In_Period,Processes,User_App_Launches,Background_Processes,Completed_Processes,Incomplete_Processes,Distinct_User_Apps" "$(head -n1 <<<"$sess")"
+expect_eq "S1: 7 processes (3 launches, 2 background, 6 completed, 1 incomplete, 2 apps)" 'S1,"tester",1000,2026-10-01 09:00:00,2026-10-01 11:00:00,COMPLETED,EXACT,7200,120.00,02:00:00,7200,yes,7,3,2,6,1,2' "$(grep '^S1,' <<<"$sess")"
+expect_eq "S2 (crosses midnight): 1 process" 'S2,"tester",1000,2026-10-01 23:30:00,2026-10-02 00:30:00,COMPLETED,EXACT,3600,60.00,01:00:00,3600,yes,1,1,0,1,0,1' "$(grep '^S2,' <<<"$sess")"
+expect_eq "S3 (crash): duration is ESTIMATED; includes the no-details process" 'S3,"tester",1000,2026-10-02 08:00:00,2026-10-02 08:50:00,CRASHED,ESTIMATED,3000,50.00,00:50:00,3000,yes,3,1,1,2,1,1' "$(grep '^S3,' <<<"$sess")"
+expect_eq "S4 ACTIVE: no duration, zero processes" 'S4,"tester",1000,2026-10-03 10:00:00,,ACTIVE,UNKNOWN,,,,,yes,0,0,0,0,0,0' "$(grep '^S4,' <<<"$sess")"
+expect_eq "S5 INTERRUPTED: no duration" 'S5,"tester",1000,2026-10-03 12:00:00,,INTERRUPTED,UNKNOWN,,,,,yes,0,0,0,0,0,0' "$(grep '^S5,' <<<"$sess")"
+expect_eq "process whose session row is missing is reported, not lost" 'SX,,,,,MISSING_SESSION,UNKNOWN,,,,,yes,1,1,0,1,0,1' "$(grep '^SX,' <<<"$sess")"
+expect_eq "sum of per-session process counts equals Total Processes" "12" "$(tail -n +2 <<<"$sess" | awk "$AWK_LIB"'{ csv_split($0, f); s += f[13] } END { print s }')"
 expect_eq "sessions are in chronological order" "S1 S2 S3 S4 S5 SX" "$(tail -n +2 <<<"$sess" | cut -d, -f1 | paste -sd' ')"
 
 section "7. daily statistics (UTC)"
@@ -249,22 +196,11 @@ expect_eq "the duplicate of P4 did not inflate Editor X launches" "2" "$(cell "$
 section "11. the raw data is never modified"
 after=$(checksums)
 expect_eq "sessions/processes/details checksums unchanged after all analysis" "$before" "$after"
-activity_text_report 5 >/dev/null; report_build "" "" 5 0 >/dev/null
-expect_eq "...and after building a full report" "$before" "$(checksums)"
+activity_text_report 5 >/dev/null; report_run_period "" "" 0 5 normal "" >/dev/null
+expect_eq "...and after generating a full report set" "$before" "$(checksums)"
 expect_eq "no file was created in data/ by the analysis" "$names_before" "$(ls -A "$DATA_DIR" | paste -sd" ")"
 
-section "12. the report"
-rd=$(ls -d "$REPORTS_DIR"/report_*/ | head -n1)
-expect_eq "8 files in the report folder" "8" "$(ls "$rd" | wc -l)"
-for f in 01_summary.csv 02_most_used_applications.csv 03_background_processes.csv 04_daily_usage.csv 05_sessions.csv 06_process_durations.csv 07_data_quality.csv 08_report.txt; do
-    expect_ok "report file exists and is not empty: $f" test -s "$rd/$f"
-done
-for h in "Total Sessions" "Total Processes" "Most Used Applications" "Total Usage Duration" "Average Process Duration" "Daily Usage Statistics"; do
-    expect_ok "report.txt contains: $h" grep -q "$h" "$rd/08_report.txt"
-done
-expect_eq "CSV files start with a UTF-8 BOM (Excel)" "efbbbf" "$(head -c3 "$rd/01_summary.csv" | od -An -tx1 | tr -d ' \n')"
-expect_ok "05_sessions.csv has the minutes column" bash -c "head -n1 '$rd/05_sessions.csv' | grep -q 'Duration_Seconds,Duration_Minutes'"
-expect_eq "summary CSV: Total_Sessions row" 'Total_Sessions,"5","sessions that STARTED in the period"' "$(grep '^Total_Sessions' "$rd/01_summary.csv")"
+section "12. the text report (the file-based reports are tested in tests/test_reports.sh)"
 text=$(activity_text_report 5)
 expect_grep "text report shows Total Sessions = 5" 'Total Sessions +5 ' "$text"
 expect_grep "text report shows the average process duration 00:20:25" 'Average Process Duration +00:20:25' "$text"
@@ -294,7 +230,7 @@ expect_eq "no files: Total_Processes = 0" '0' "$(cell "$e" 1 Total_Processes 2 |
 expect_eq "no files: average process duration is empty (n/a), not 0" "" "$(cell "$e" 1 Average_Process_Duration_Seconds 2)"
 expect_eq "no files: app table is just a header" "1" "$(activity_apps User_Application 5 | grep -c '')"
 activity_text_report 5 >/dev/null 2>&1 && pass "no files: text report runs" || fail "no files: text report runs"
-expect_ok "no files: full report builds" report_build "" "" 5 0
+expect_ok "no files: full report builds" report_run_period "" "" 0 5 normal ""
 mk_files; activity_prepare "" "" 0
 expect_eq "headers only: Total_Sessions = 0" '0' "$(cell "$(activity_summary)" 1 Total_Sessions 2 | tr -d '"')"
 expect_eq "headers only: daily is just a header" "1" "$(activity_daily | grep -c '')"

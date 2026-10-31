@@ -48,8 +48,11 @@ Commands:
                                 Session log (UTC by default; --local = this machine's zone)
   stats  [--from D] [--to D] [--top N] [--utc-offset +03:00] [--quality]
                                 Activity report: sessions, processes, usage, top apps, daily
-  report [--from D] [--to D] [--top N] [--utc-offset +03:00]
-                                Excel-ready CSV report (+ report.txt) in reports/
+  report daily  [--date D | --from D --to D] [--utc-offset +03:00] [--refresh|--force]
+                                One Excel-ready report set per day (reports/daily/…)
+  report period [--from D] [--to D] [--name N] [--utc-offset +03:00]   One set for any period
+  report verify [DIR…]          Check report files against their manifests and Excel rules
+  report list                   Show the generated report sets
   purge  --all | --before YYYY-MM-DD [--yes]   Delete logged data
   doctor                        Check the environment
   version | help
@@ -62,7 +65,15 @@ EOF
 main_die() { echo "error: $*" >&2; exit 1; }
 
 # main_valid_date D — empty or YYYY-MM-DD.
-main_valid_date() { [[ -z $1 || $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; }
+main_valid_date() {
+    # A real calendar date: 2026-13-01 and 2026-02-30 are refused (checked by a round trip).
+    local _e _d _t
+    if [[ -z $1 ]]; then return 0; fi
+    [[ $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+    common_utc_to_epoch _e "$1" "00:00:00" || return 1
+    common_utc_date_time _d _t "$_e"
+    [[ $_d == "$1" ]]
+}
 
 # main_parse_offset VALUE — "+03:00", "-0530", "3" ... -> OPT_OFFSET (seconds, max +-14 h).
 main_parse_offset() {
@@ -238,13 +249,55 @@ cmd_stats() {
     activity_text_report "$OPT_TOP"
 }
 
-cmd_report() {
-    local dir
-    main_parse_range "$@"
+# main_report_generate KIND OPTIONS... — shared option parsing for `report daily|period`.
+main_report_generate() {
+    local kind=$1 mode=normal date="" name="" explicit=0
+    shift
+    OPT_FROM=""; OPT_TO=""; OPT_TOP=$REPORT_TOP; OPT_OFFSET=$REPORT_UTC_OFFSET_SEC
+    while (( $# > 0 )); do
+        case $1 in
+            --date) date=${2-}; shift 2 || main_die "--date needs a value" ;;
+            --from) OPT_FROM=${2-}; shift 2 || main_die "--from needs a value" ;;
+            --to)   OPT_TO=${2-};   shift 2 || main_die "--to needs a value" ;;
+            --top)  OPT_TOP=${2-};  shift 2 || main_die "--top needs a value" ;;
+            --name) name=${2-};     shift 2 || main_die "--name needs a value" ;;
+            --utc-offset) main_parse_offset "${2-}"; shift 2 || main_die "--utc-offset needs a value" ;;
+            --all) shift ;;
+            --refresh) mode=refresh; shift ;;
+            --force) mode=force; shift ;;
+            *) main_die "unknown option: $1" ;;
+        esac
+    done
+    main_valid_date "$OPT_FROM" || main_die "invalid --from date"
+    main_valid_date "$OPT_TO" || main_die "invalid --to date"
+    main_valid_date "$date" || main_die "invalid --date"
+    [[ $OPT_TOP =~ ^[0-9]+$ ]] || main_die "--top must be a number"
+    [[ -z $name || $name =~ ^[A-Za-z0-9._-]{1,64}$ ]] || main_die "--name may only contain letters, digits, . _ - (max 64)"
+    if [[ -n $date ]]; then
+        [[ -z $OPT_FROM && -z $OPT_TO ]] || main_die "use either --date or --from/--to"
+        OPT_FROM=$date; OPT_TO=$date; explicit=1
+    fi
+    if [[ -n $OPT_FROM && -n $OPT_TO && $OPT_FROM > $OPT_TO ]]; then main_die "--from is after --to"; fi
     storage_init || main_die "cannot create directories"
-    dir=$(report_build "$OPT_FROM" "$OPT_TO" "$OPT_TOP" "$OPT_OFFSET") || main_die "report failed"
-    echo "Report created: $dir"
-    ls -1 "$dir"
+    if [[ $kind == daily ]]; then
+        report_run_daily "$OPT_FROM" "$OPT_TO" "$OPT_OFFSET" "$OPT_TOP" "$mode" "$explicit"
+    else
+        report_run_period "$OPT_FROM" "$OPT_TO" "$OPT_OFFSET" "$OPT_TOP" "$mode" "$name"
+    fi
+}
+
+cmd_report() {
+    local sub=${1:-} d rc=0
+    case $sub in
+        daily|period) shift; main_report_generate "$sub" "$@" || exit 1 ;;
+        verify)
+            shift
+            if (( $# == 0 )); then report_verify_all || exit 1
+            else for d in "$@"; do if report_verify_dir "$d"; then echo "OK        $d"; else echo "PROBLEMS  $d"; rc=1; fi; done; exit "$rc"; fi ;;
+        list)  report_list ;;
+        ""|-*) main_report_generate period "$@" || exit 1 ;;     # short form: report [--from D] [--to D]
+        *) main_die "unknown report command '$sub' (daily | period | verify | list)" ;;
+    esac
 }
 
 cmd_purge() {

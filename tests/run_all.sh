@@ -31,6 +31,9 @@ bash tests/test_processes.sh || rc=1
 echo "== activity analyzer tests =="
 bash tests/test_activity.sh || rc=1
 
+echo "== report generator tests =="
+bash tests/test_reports.sh || rc=1
+
 echo "== smoke test =="
 bash tests/smoke.sh || rc=1
 exit "$rc"

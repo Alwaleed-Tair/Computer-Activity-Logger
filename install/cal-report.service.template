@@ -1,0 +1,9 @@
+[Unit]
+Description=Computer Activity Logger — generate the daily reports (only reads the logs, writes under reports/)
+Documentation=file://@CAL_ROOT@/README.md
+
+[Service]
+Type=oneshot
+ExecStart=@CAL_ROOT@/main.sh report daily
+Nice=19
+IOSchedulingClass=idle

@@ -7,7 +7,7 @@
 
 ثم يحوّل ذلك إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel.
 
-> الحالة: **v0.4 — Activity Analyzer مكتمل** (تقرير إحصائي: الجلسات، العمليات، أكثر التطبيقات استخدامًا، المدد والمتوسطات، الإحصاءات اليومية) فوق Process Monitor وSession Logger.
+> الحالة: **v0.5 — Report Generator مكتمل** (تقارير Session / Application Activity / Usage Summary يومية وبفترة، بكتابة ذرّية وحماية للتاريخ) فوق Activity Analyzer وProcess Monitor وSession Logger.
 > التصميم الكامل في [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## الخصوصية (ملتزمون بها)
@@ -33,7 +33,7 @@ Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df
 ./main.sh start          # يبدأ في الخلفية
 ./main.sh status         # الحالة والمسارات وحجم البيانات
 ./main.sh stats          # تقرير النشاط الكامل في الطرفية (أضف --utc-offset +03:00 لحدود اليوم المحلية)
-./main.sh report         # ينشئ تقريرًا في reports/report_<التاريخ>/
+./main.sh report         # تقرير الفترة كاملة → reports/period/UTC/all/   (راجع «مولّد التقارير»)
 ./main.sh sessions       # سجل الجلسات (UTC) — أضف --local أو --tz Asia/Riyadh للتوقيت المحلي
 ./main.sh processes      # آخر العمليات المنتهية — أضف --running (الجارية الآن) أو --apps أو --background أو --check
 ./main.sh stop           # يوقف ويحفظ كل السجلات المفتوحة (إن لم يستجب خلال STOP_TIMEOUT_SEC يُفرض إيقافه ويُغلق التعافي جلسته عند التشغيل التالي)
@@ -69,13 +69,13 @@ lib/
   daemon.sh            الحلقة الرئيسية والإشارات والإغلاق الآمن
   analyzer.sh          عروض الصفوف: الجلسات والعمليات
   activity.sh          Activity Analyzer: الإحصاءات والملخص والتقرير (awk/sort/uniq، قراءة فقط)
-  report.sh            تقارير Excel
+  report.sh            Report Generator: تقارير Session / Application Activity / Usage Summary (يومية وبفترة) بكتابة ذرّية
 conf/                  ignore.list.example · apps.map.example (انسخهما بدون .example للتخصيص)
 data/                  السجلات الخام: sessions.csv · processes.csv · process_details.csv
 reports/               التقارير المولّدة
 state/                 حالة التشغيل (pid، heartbeat…) — تُنشأ تلقائيًا ولا تُرفع إلى git
 install/               install.sh · uninstall.sh · قوالب systemd و autostart
-tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (163) · test_activity.sh (145) · smoke.sh
+tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (175) · test_activity.sh (127) · test_reports.sh (213) · fixtures.sh · smoke.sh
 docs/DESIGN.md         وثيقة التصميم الكاملة
 ```
 
@@ -157,7 +157,6 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 ```bash
 ./main.sh stats [--from 2026-10-01] [--to 2026-10-31] [--top 10] [--utc-offset +03:00]   # التقرير في الطرفية
 ./main.sh stats --quality        # ما الذي تُجوهل أو لم يكن اكتمالًا طبيعيًا
-./main.sh report [نفس الخيارات]   # ثمانية ملفات في reports/report_<وقت>/
 ```
 
 **ثلاثة مقاييس مختلفة (لا تُخلط):**
@@ -175,9 +174,41 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 **الأيام:** العدّ (جلسات، عمليات، إطلاقات) في **يوم البدء**، والمدد **تُقسَّم عند منتصف الليل** وتُقصّ على الفترة المطلوبة. `--utc-offset` يحرّك حدود اليوم فقط (المخزَّن يبقى UTC).
 
 **ملفات `report`:** `01_summary` · `02_most_used_applications` · `03_background_processes` · `04_daily_usage` · `05_sessions` (بعدد العمليات لكل جلسة) · `06_process_durations` (مدة كل عملية + هل انتهت طبيعيًا) · `07_data_quality` · `08_report.txt` (التقرير الكامل: Total Sessions / Total Processes / Most Used Applications / Total Usage Duration / Average Process Duration / Daily Usage Statistics).
+### مولّد التقارير: Report Generator (`lib/report.sh`)
+
+ثلاثة تقارير CSV جاهزة لـ Excel، تُنتَج **لكل يوم** أو **لأي فترة**:
+
+| الملف | يحوي |
+|---|---|
+| `session_report.csv` | **Session Report** — صف لكل جلسة: المستخدم، الدخول والخروج (UTC)، المدة بالثواني والدقائق و`HH:MM:SS`، جودة المدة (`EXACT`/`ESTIMATED`/`UNKNOWN`)، وعدد عمليات الجلسة |
+| `application_activity_report.csv` | **Application Activity Report** — صف لكل عملية: التطبيق، الفئة (تطبيق/خلفية)، البدء والانتهاء، المدة، الحالة، هل انتهت طبيعيًا، CPU، وملاحظة |
+| `usage_summary_report.csv` | **Usage Summary Report** — جدول واحد منتظم: `Overview` (إجمالي الجلسات والعمليات ومدة الاستخدام ومتوسط مدة العملية…) · `Most_Used_Applications` (مرتبة) · `Daily_Session_Time` · `Daily_Application_Active_Time` · `Data_Quality` |
+| `report_manifest.csv` | ما كُتب ومتى: لكل ملف عدد الصفوف والحجم وSHA-256 وتاريخ الإنشاء والحالة `FINAL`/`PARTIAL` |
+
+```bash
+./main.sh report daily                        # كل الأيام التي فيها نشاط → reports/daily/UTC/YYYY-MM-DD/
+./main.sh report daily --date 2026-10-01      # يوم واحد
+./main.sh report daily --utc-offset +03:00    # حدود اليوم المحلي → reports/daily/UTC+0300/…
+./main.sh report period --from 2026-10-01 --to 2026-10-31 [--name أكتوبر_مثلا]   # فترة → reports/period/UTC/<اسم>/
+./main.sh report verify                       # يفحص كل مجموعات التقارير (مانيفست + قواعد Excel)
+./main.sh report list                         # المجموعات الموجودة وحالتها
+install/install.sh --with-daily-reports       # مؤقّت systemd: تقرير اليوم بعد منتصف الليل (Persistent: يعوّض الأيام الفائتة)
+```
+
+**ترتيب ووضوح:** كل ملف يبدأ بعمود `Report_Created_UTC` (تاريخ الإنشاء)، والصفوف مرتبة زمنيًا (الجلسات بالدخول، العمليات بالبدء، الأيام بالتاريخ). الجلسة أو العملية التي تعبر منتصف الليل تظهر في اليومين: `Started_In_Period` يحدد أين بدأت، و`Seconds_In_Period` حصة اليوم منها، فمجموعها يطابق المدة تمامًا.
+
+**عدم استبدال التاريخ دون داعٍ:**
+- **`FINAL`** (انتهى اليوم ولا جلسة مفتوحة ولا عملية قيد التتبع قبل نهايته): **مجمَّد** — التشغيل العادي يتخطاه دون حتى إعادة حسابه.
+- **`PARTIAL`** (اليوم الجاري، أو فيه جلسة مفتوحة): يُعاد توليده **عند تغيّر المحتوى فقط**؛ لو لم يتغير يبقى كما هو بتاريخ إنشائه الأصلي.
+- `--refresh` يعيد حساب يوم نهائي ويستبدله **فقط إن تغيّر محتواه فعلًا**؛ `--force` يعيد كتابته دائمًا. وفي الحالتين تُحفظ النسخة القديمة كما هي في `…/revisions/<وقت-إنشائها>/`.
+- سجل تدقيق إضافي فقط: `reports/report_log.csv` (GENERATED / REPLACED).
+
+**الكتابة الآمنة:** مولّد واحد في الوقت (`flock`)؛ البناء في مجلد مؤقت مخفي على نفس القرص؛ كل ملف يُنقل بإعادة تسمية **ذرّية** (القارئ يرى القديم أو الجديد كاملًا، لا نصفًا)؛ والمانيفست آخرًا، فانقطاع في المنتصف يترك مجموعة يكشفها `report verify` ويصلحها التشغيل التالي (وتُنظَّف المجلدات المؤقتة العالقة).
+
+**التوافق مع Excel (يفحصه `report verify`):** UTF-8 مع BOM · نهايات أسطر CRLF · صف عناوين واحد وعدد أعمدة ثابت · اقتباس صحيح (`"Evil, ""App"""`) · تواريخ `YYYY-MM-DD HH:MM:SS` وأرقام عادية · أي اسم يبدأ بـ `= + - @` يُحمى بأبوستروف (لا حقن صيغ) · لا خلية فوق 32,767 حرفًا · لا ملف فوق `REPORT_MAX_ROWS` (افتراضيًا مليون؛ الأطول يُقسَّم إلى `_part1`, `_part2`… بعنوان مكرَّر). وفي الاختبارات تُفتح الملفات فعليًا في LibreOffice للتأكد (أعمدة، أرقام كأرقام، لا صيغ، النص العربي). **لم أستطع تشغيل Excel نفسه** في هذه البيئة.
 ### فتح التقارير في Excel
-افتح ملفات `reports/report_*/*.csv` مباشرة. الترميز UTF-8 مع BOM فيظهر العربي صحيحًا،
-وأعمدة `*_sec` رقمية للجمع والـ Pivot، وأعمدة `*_hms` للقراءة.
+افتح ملفات `reports/daily/UTC/<اليوم>/*.csv` مباشرة بنقرتين في Excel. الترميز UTF-8 مع BOM فيظهر العربي صحيحًا،
+وأعمدة `*_Seconds` رقمية للجمع والـ Pivot، وأعمدة `*_HMS` للقراءة. (مجموع `Seconds_In_Period` في تقرير جلسات اليوم = استخدام ذلك اليوم.)
 إن ظهرت الأعمدة في خلية واحدة (إعدادات إقليمية تستخدم `;`) فاستخدم *Data ▸ From Text/CSV* واختر الفاصل `,`.
 
 ## حدود معروفة

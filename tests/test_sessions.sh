@@ -258,7 +258,7 @@ echo "      statuses: $(statuses)"
 expect_ok "sessions table renders (UTC)" bash -c "'$MAIN' sessions | grep -q COMPLETED"
 expect_ok "sessions --local renders" bash -c "TZ='<+03>-3' '$MAIN' sessions --local | grep -q 'Login(local)'"
 expect_ok "sessions --status CRASHED filters" bash -c "[ \$('$MAIN' sessions --status CRASHED | tail -n +2 | wc -l) -eq 1 ]"
-expect_ok "report has Duration_Minutes" bash -c "'$MAIN' report >/dev/null && head -n1 '$REPORTS_DIR'/report_*/05_sessions.csv | grep -q 'Duration_Seconds,Duration_Minutes'"
+expect_ok "report has Duration_Minutes" bash -c "'$MAIN' report >/dev/null && head -n1 '$REPORTS_DIR'/period/UTC/all/session_report.csv | grep -q 'Duration_Seconds,Duration_Minutes'"
 expect_ok "stats runs with the new session file" "$MAIN" stats
 expect_ok "purge --before keeps files valid" bash -c "'$MAIN' purge --before 2020-01-01 --yes >/dev/null && '$MAIN' sessions --check >/dev/null"
 
