@@ -24,7 +24,17 @@ CAL_BOOT_ID_FILE="$SANDBOX/boot"; export CAL_BOOT_ID_FILE; echo "boot-test-0000-
 FAILS=0 TOTAL=0
 BGPIDS=()
 
+dump_diagnostics() {
+    if (( FAILS > 0 )); then
+        echo; echo "---- diagnostics (a check failed) ----"
+        echo "daemon pid file: $(cat "$STATE_DIR/daemon.pid" 2>/dev/null || echo none)   alive: $(kill -0 "$(cat "$STATE_DIR/daemon.pid" 2>/dev/null)" 2>/dev/null && echo yes || echo NO)"
+        echo "heartbeat: $(cat "$HEARTBEAT_FILE" 2>/dev/null || echo none)   now: $(date +%s)"
+        echo "---- WARN/ERROR lines of cal.log (whole run) ----"; grep -E "WARN|ERROR" "$STATE_DIR/cal.log" 2>/dev/null | tail -n 40
+        echo "---- last 12 lines of cal.log ----"; tail -n 12 "$STATE_DIR/cal.log" 2>/dev/null
+    fi
+}
 cleanup() {
+    dump_diagnostics
     "$ROOT/main.sh" stop >/dev/null 2>&1 || true
     local p; for p in "${BGPIDS[@]}"; do kill -9 "$p" 2>/dev/null || true; done
     rm -rf -- "$SANDBOX"
@@ -43,7 +53,7 @@ section() { printf '\n== %s ==\n' "$1"; }
 # --- load the modules under test --------------------------------------------
 # shellcheck source=/dev/null
 source "$ROOT/config.sh"
-for m in common consent storage sessionlog collector detector session recovery daemon analyzer; do
+for m in common consent storage sessionlog collector detector session recovery daemon analyzer activity; do
     # shellcheck source=/dev/null
     source "$ROOT/lib/$m.sh"
 done
@@ -187,11 +197,12 @@ expect_eq "command name comes from the executable" "browserx" "$(record_unpack "
 expect_eq "app name for the helpers is the application's" "Browser X" "$(record_unpack "${ACTIVE[50002]}"; echo "$R_APP")"
 scan_begin $(( UP0 + 14 )) $(( T0 + 14 )); scan_add 50000 1 14 '?' browserx 20 95000; scan_add 50001 50000 13 '?' "Web Content" 9 41000; scan_end
 scan_begin $(( UP0 + 20 )) $(( T0 + 20 )); scan_end
-top=$(analyzer_top_apps "" "" 10 User_Application | tail -n +2)
-expect_eq "stats: launches counts roots only" "1" "$(awk -F, '{print $2}' <<<"$top")"
-expect_eq "stats: process count" "4" "$(awk -F, '{print $3}' <<<"$top")"
-expect_eq "stats: union of overlapping intervals (not 20+13+...)" "20" "$(awk -F, '{print $4}' <<<"$top")"
-expect_eq "background class listed separately" "daemonx" "$(analyzer_top_apps "" "" 10 Background_Process | tail -n +2 | awk -F, '{print $1}' | tr -d '"' | sort | head -1)"
+activity_prepare "" "" 0
+top=$(activity_apps User_Application 10 | tail -n +2)     # Rank,App,Launches,Already,Processes,Completed,Incomplete,Active_Seconds,...
+expect_eq "stats: launches counts roots only" "1" "$(awk -F, '{print $3}' <<<"$top")"
+expect_eq "stats: process count" "4" "$(awk -F, '{print $5}' <<<"$top")"
+expect_eq "stats: union of overlapping intervals (not 20+13+...)" "20" "$(awk -F, '{print $8}' <<<"$top")"
+expect_eq "background class listed separately" "daemonx" "$(activity_apps Background_Process 10 | tail -n +2 | awk -F, '{print $2}' | tr -d '"' | sort | head -1)"
 expect_eq "details: the 4 browser rows share one App_Instance" "1" "$(grep -h "^UT-SESSION,5000[0-3]," "$PROCESS_DETAILS_FILE" | awk -F, '{print $(NF-12)}' | sort -u | wc -l)"
 expect_eq "details: exactly one of them is the root" "1" "$(grep -h "^UT-SESSION,5000[0-3]," "$PROCESS_DETAILS_FILE" | awk -F, '{print $(NF-11)}' | grep -c '^yes$')"
 
@@ -300,6 +311,21 @@ printf 'other,header\n1,2\n' >"$SANDBOX/foreign.csv"
 storage_prepare_csv "$SANDBOX/foreign.csv" "$PROCESSES_HEADER"
 expect_eq "foreign file moved aside, not overwritten" "other,header" "$(head -n1 "$SANDBOX"/foreign.csv.invalid.* | head -n1)"
 
+section "A13. regression: a process dying while its cgroup is read must not freeze the monitor"
+FP="$SANDBOX/fakeproc"; mkdir -p "$FP/700" "$FP/701"; printf "%s\n" "9:name=systemd:/user.slice/a" "0::/user.slice/user@1.service/app.slice/app-x.scope" >"$FP/700/cgroup"
+CAL_PROC_ROOT=$FP detector_read_cgroup 700
+expect_eq "cgroup text is read from every line" "9:name=systemd:/user.slice/a 0::/user.slice/user@1.service/app.slice/app-x.scope" "$CG"
+CAL_PROC_ROOT=$FP detector_read_cgroup 999; expect_eq "a process that is already gone gives an empty result, not an error" "" "$CG"
+# Simulate ESRCH: a `read` that succeeds once, then fails and leaves its variable untouched.
+SHIM='read() { if (( ${_RN:-0} == 0 )); then _RN=1; builtin read "$@"; else return 1; fi; }'
+old_idiom='old() { local line CG=; while IFS= read -r line || [[ -n $line ]]; do CG+="$line "; done <"$1"; }'
+timeout 3 bash -c "$SHIM; $old_idiom; old \"$FP/700/cgroup\"" >/dev/null 2>&1; rc_old=$?
+expect_eq "control: the OLD read-loop idiom spins forever under that failure (timeout, rc 124)" "124" "$rc_old"
+timeout 5 bash -c "$SHIM; export CAL_PROC_ROOT=$FP; source \"$ROOT/lib/detector.sh\"; detector_read_cgroup 700; [[ -n \\$CG || 1 ]]" >/dev/null 2>&1; rc_new=$?
+expect_eq "the new reader finishes even when read fails mid-file" "0" "$rc_new"
+expect_eq "static check: no code reads a /proc file in a while-read loop" "0" "$(grep -cE 'done *< */proc' "$ROOT"/lib/*.sh | awk -F: '{s+=$2} END {print s+0}')"
+
+
 # =============================================================================
 # Part B — the real daemon watching real processes
 # =============================================================================
@@ -387,9 +413,11 @@ expect_ok "parent and two helpers are tracked" wait_for 5 bash -c "[ \$('$MAIN' 
 expect_eq "helpers are not roots" "no" "$(running_row childhelper | awk -F'\t' '{print $5}' | sort -u)"
 expect_eq "the parent is the root" "yes" "$(running_row parentapp | awk -F'\t' '{print $5}')"
 wait_for 14 bash -c "[ \$(grep -c ',\"childhelper\",' '$PROCESSES_FILE') -ge 2 ] && grep -q ',\"parentapp\",' '$PROCESSES_FILE'"
-apps=$("$MAIN" processes --apps | tr -d '"')
-expect_eq "stats count Parent App as ONE launch of THREE processes" "Parent App,1,3" "$(grep '^Parent App' <<<"$apps" | cut -d, -f1-3)"
-expect_ok "...and don't list helpers as applications" bash -c "! grep -q '^childhelper' <<<'$apps'"
+activity_prepare "" "" 0
+apps=$(activity_apps User_Application 10)
+expect_eq "stats count Parent App as ONE launch of THREE processes" "Parent App,1,3" "$(awk "$AWK_LIB"'NR > 1 { csv_split($0, f); if (f[2] == "Parent App") print f[2] "," f[3] "," f[5] }' <<<"$apps")"
+expect_eq "...and helpers are not listed as applications" "0" "$(grep -c childhelper <<<"$apps")"
+expect_ok "...the CLI shows the same table" bash -c "'$MAIN' processes --apps | grep -q 'Parent App'"
 
 section "B6. the monitor DIES (kill -9) while processes are running"
 bg "$SANDBOX/bin/survivor1" 40; S1=$LASTBG; bg "$SANDBOX/bin/survivor2" 40; S2=$LASTBG; bg "$SANDBOX/bin/casualty" 6; CD=$LASTBG
@@ -473,6 +501,22 @@ expect_eq "no sudo anywhere in the code" "0" "$(grep -rwn 'sudo' "$ROOT/lib" "$R
 expect_eq "only the current user's processes are requested from ps" "1" "$(grep -c 'ps -u "\$EUID"' "$ROOT/lib/collector.sh")"
 expect_eq "command-line arguments / environment are never read" "0" "$(grep -hE '/proc/[^ ]*(cmdline|environ)|ps .*-o [^ ]*(args|cmd=|command)' "$ROOT/lib/collector.sh" "$ROOT/lib/detector.sh" | grep -vc '^[[:space:]]*#')"
 expect_eq "data files are private (600)" "" "$(find "$DATA_DIR" -maxdepth 1 -type f \( -name '*.csv' \) ! -perm 600)"
+
+section "B10. a frozen monitor is still stoppable (stop forces it) and recovery works afterwards"
+"$MAIN" start >/dev/null; sleep 2
+FROZEN=$(daemon_pid); SID_F=$(sid_now)
+kill -STOP "$FROZEN"
+t0=$(date +%s); out=$(STOP_TIMEOUT_SEC=2 "$MAIN" stop 2>&1); rc=$?; t1=$(date +%s)
+expect_eq "stop exits 0 even though the monitor was frozen" "0" "$rc"
+expect_eq "...and says it had to force it" "1" "$(grep -c 'forcing it' <<<"$out")"
+expect_between "...within the configured timeout (2 s) plus a little" 2 8 "$(( t1 - t0 ))"
+st_f=$(ps -o stat= -p "$FROZEN" 2>/dev/null | tr -d ' ')     # a killed process may linger as an unreaped zombie (Z): that is dead
+expect_eq "the frozen process is really dead (gone, or only an unreaped zombie)" "dead" "$([[ -z $st_f || $st_f == Z* ]] && echo dead || echo "alive ($st_f)")"
+"$MAIN" start >/dev/null; sleep 2
+expect_eq "the forced session is closed by recovery as CRASHED" "CRASHED" "$(awk -F, -v s="$SID_F" '$1==s {print $NF}' "$SESSIONS_FILE")"
+"$MAIN" stop >/dev/null
+expect_ok "files are consistent after the forced stop and recovery" "$MAIN" processes --check
+expect_ok "STOP_TIMEOUT_SEC=0 is rejected" bash -c "! STOP_TIMEOUT_SEC=0 '$MAIN' status >/dev/null 2>&1"
 
 printf '\n%d checks, %d failed\n' "$TOTAL" "$FAILS"
 if (( FAILS == 0 )); then echo "ALL PROCESS TESTS PASSED"; fi

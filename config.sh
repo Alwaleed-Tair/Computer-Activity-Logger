@@ -52,6 +52,10 @@ HEARTBEAT_FILE="$STATE_DIR/heartbeat"    # last time the daemon was alive
 LOG_FILE="$STATE_DIR/cal.log"            # the program's own diagnostic log
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-1048576}"
 
+# `./main.sh stop` waits this long for a clean stop, then forces it (SIGKILL). A forced
+# stop is safe: the open session and processes are finished by recovery at the next start.
+STOP_TIMEOUT_SEC="${STOP_TIMEOUT_SEC:-10}"
+
 # --- Session log (sessions.csv) ----------------------------------------------
 # ONE file for all sessions. A row is written when a session starts and is
 # updated in place when it ends. Everything stored in it is UTC.
@@ -94,6 +98,10 @@ config_validate() {
     fi
     if ! [[ $MIN_DURATION_SEC =~ ^[0-9]+$ ]]; then
         echo "config: MIN_DURATION_SEC must be a non-negative integer (got '$MIN_DURATION_SEC')" >&2
+        ok=1
+    fi
+    if ! [[ $STOP_TIMEOUT_SEC =~ ^[0-9]+$ ]] || (( STOP_TIMEOUT_SEC < 1 )); then
+        echo "config: STOP_TIMEOUT_SEC must be a positive integer (got '$STOP_TIMEOUT_SEC')" >&2
         ok=1
     fi
     if ! [[ $MIN_FREE_MB =~ ^[0-9]+$ ]]; then

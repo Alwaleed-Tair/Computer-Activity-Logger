@@ -142,11 +142,18 @@ detector_load_desktop() {
 
 # detector_read_cgroup PID — sets CG to the (flattened) content of /proc/PID/cgroup.
 # Only the control-group *paths* are read (no arguments, no environment).
+#
+# IMPORTANT: never loop on `read` over a /proc file. If the process exits between
+# two reads, `read` fails with ESRCH and leaves the variable at its PREVIOUS value,
+# so `while read line || [[ -n $line ]]` spins forever (the daemon froze at 100%
+# CPU and ignored SIGTERM). `mapfile` stops at EOF or at the first read error and
+# cannot loop. CAL_PROC_ROOT only exists so tests can point it at a fake /proc.
 detector_read_cgroup() {
-    local line
+    local -a lines=()
     CG=""
-    if [[ -r /proc/$1/cgroup ]]; then
-        while IFS= read -r line || [[ -n $line ]]; do CG+="$line "; done </proc/"$1"/cgroup
+    if [[ -r ${CAL_PROC_ROOT:-/proc}/$1/cgroup ]]; then
+        { mapfile -t lines <"${CAL_PROC_ROOT:-/proc}/$1/cgroup"; } 2>/dev/null || true
+        if (( ${#lines[@]} > 0 )); then CG="${lines[*]}"; fi
     fi
     return 0
 }

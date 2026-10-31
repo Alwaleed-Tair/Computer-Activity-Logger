@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 **Computer Activity Logger** — a Bash-only tool that, with the user's explicit consent, runs in the background after login and logs process start/end times and durations to CSV files, then produces statistics and Excel-openable reports.
 
-**Status:** v0.1 — base skeleton implemented and smoke-tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
+**Status:** v0.4 — session logger, process monitor and activity analyzer implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
 
 ## Language
 
@@ -36,13 +36,13 @@ Key design rules:
 ```
 main.sh            CLI entry point (dispatches commands to lib/)
 config.sh          all settings (env vars / config.local.sh override)
-lib/*.sh           modules (common, consent, collector, detector, session, sessionlog,
+lib/*.sh           modules (common, consent, collector, detector, session, sessionlog, activity,
                    storage, recovery, daemon, analyzer, report)
 conf/              *.example lists (ignore.list, apps.map)
 data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
 state/             runtime state (git-ignored)
 install/           install.sh, uninstall.sh, systemd/autostart templates
-tests/             run_all.sh, test_sessions.sh, test_processes.sh, smoke.sh (end-to-end)
+tests/             run_all.sh, test_sessions.sh, test_processes.sh, test_activity.sh, smoke.sh
 docs/              DESIGN.md
 ```
 
@@ -51,7 +51,8 @@ docs/              DESIGN.md
 ```bash
 bash tests/run_all.sh        # bash -n + shellcheck (if installed) + sandboxed smoke test
 bash tests/test_sessions.sh   # session logger tests (75 checks)
-bash tests/test_processes.sh  # process monitor tests (161 checks)
+bash tests/test_processes.sh  # process monitor tests (163 checks)
+bash tests/test_activity.sh   # activity analyzer tests (145 checks, known-answer dataset)
 bash tests/smoke.sh          # smoke test only
 ./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
@@ -87,3 +88,20 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - Only `ps -u $EUID`; no `sudo`; never read `cmdline`/`environ`. Process names are untrusted text: no `eval`, always quote, and keep them out of arithmetic contexts.
 - Anything found in the first scan after a (re)start is "found running" (`pre=yes`), never "started". Recovery re-attaches survivors with their ORIGINAL record; do not create a new record for them.
 - Tests that write config files must create them BEFORE sourcing `config.sh` and must assert the paths are inside the sandbox (config falls back to `conf/*.example`, which would otherwise be overwritten).
+
+## Analyzer rules (lib/activity.sh)
+
+- **Read-only.** The analyzer never writes to `data/` or modifies raw CSVs; reports go to `reports/` only.
+- **Three different measures — never mix them:** session time (Total Usage Duration), application time (UNION of a process group's intervals, `_act_union`), and process-seconds (plain sum; concurrent processes add up, so it is NOT usage time and must be labelled as such).
+- Averages use `COMPLETED` rows only. `SESSION_END` (lower bound) and `RECOVERED` (estimated end) are counted separately; sessions `ACTIVE`/`INTERRUPTED` have no duration and are never totalled. No data to average => empty/`n/a`, never 0.
+- A *launch* is an application ROOT that started while monitored; "found running" (`pre=yes`) is `Already_Running`, measured from first sight. Never merge rows without a details row into an application.
+- mawk has no `mktime`/`strftime`/`{n}` regex: use the pure-arithmetic helpers in `AWK_LIB` (`epoch`, `fmt_ts`, `dayname`, `day_segments`).
+- When testing analysis, work out expected numbers by hand from the dataset's timeline, and check the tests can fail (mutate the analyzer in a copy under the scratchpad).
+- GNU `grep` refuses to append a file to itself (`grep x f >> f`): capture into a variable first.
+
+## Hard-won rules (bugs the tests caught)
+
+- **Never loop on `read` over a `/proc` file** (`while read x || [[ -n $x ]]`). If the process exits mid-read, `read` fails with ESRCH and leaves `x` at its previous non-empty value => infinite loop (the daemon froze at 100% CPU and ignored SIGTERM). Use `mapfile` or a single `read -d ''`. `tests/test_processes.sh` A13 holds a control that shows the old idiom spinning.
+- `./main.sh stop` must always work: it waits `STOP_TIMEOUT_SEC`, then sends SIGKILL (safe: recovery closes the session at the next start).
+- When a test fails intermittently, find the cause before re-running: the failing run's log (`cal.log`, daemon state) is printed by `dump_diagnostics` in `tests/test_processes.sh`. A leftover daemon after the suite means something leaked.
+- A killed process can linger as a zombie (`Z`): `kill -0` still succeeds. Judge liveness by the lock (`daemon_is_running`) or `ps -o stat=`.

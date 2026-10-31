@@ -22,7 +22,7 @@ export CAL_ROOT
 # --- Load configuration and modules -----------------------------------------
 # shellcheck source=config.sh
 source "$CAL_ROOT/config.sh"
-for _module in common consent storage sessionlog collector detector session recovery daemon analyzer report; do
+for _module in common consent storage sessionlog collector detector session recovery daemon analyzer activity report; do
     # shellcheck source=/dev/null
     source "$CAL_ROOT/lib/${_module}.sh"
 done
@@ -46,8 +46,10 @@ Commands:
                                 Process log: finished (default) / running now / by application
   sessions [--local|--tz ZONE] [--from D] [--to D] [--status S] [--check]
                                 Session log (UTC by default; --local = this machine's zone)
-  stats  [--from D] [--to D] [--top N]    Usage statistics in the terminal
-  report [--from D] [--to D] [--top N]    Excel-ready CSV report in reports/
+  stats  [--from D] [--to D] [--top N] [--utc-offset +03:00] [--quality]
+                                Activity report: sessions, processes, usage, top apps, daily
+  report [--from D] [--to D] [--top N] [--utc-offset +03:00]
+                                Excel-ready CSV report (+ report.txt) in reports/
   purge  --all | --before YYYY-MM-DD [--yes]   Delete logged data
   doctor                        Check the environment
   version | help
@@ -62,14 +64,29 @@ main_die() { echo "error: $*" >&2; exit 1; }
 # main_valid_date D — empty or YYYY-MM-DD.
 main_valid_date() { [[ -z $1 || $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; }
 
+# main_parse_offset VALUE — "+03:00", "-0530", "3" ... -> OPT_OFFSET (seconds, max +-14 h).
+main_parse_offset() {
+    local sign=1 h m
+    if [[ ${1-} =~ ^([+-]?)([0-9]{1,2})(:?([0-9]{2}))?$ ]]; then
+        if [[ ${BASH_REMATCH[1]} == - ]]; then sign=-1; fi
+        h=$(( 10#${BASH_REMATCH[2]} )); m=$(( 10#${BASH_REMATCH[4]:-0} ))
+        if (( h > 14 || m > 59 )); then main_die "--utc-offset out of range (+-14:00): $1"; fi
+        OPT_OFFSET=$(( sign * (h * 3600 + m * 60) ))
+    else
+        main_die "invalid --utc-offset (use e.g. +03:00): ${1-}"
+    fi
+}
+
 # main_parse_range ARGS... — sets OPT_FROM, OPT_TO, OPT_TOP.
 main_parse_range() {
-    OPT_FROM=""; OPT_TO=""; OPT_TOP=10
+    OPT_FROM=""; OPT_TO=""; OPT_TOP=10; OPT_OFFSET=0; OPT_QUALITY=0
     while (( $# > 0 )); do
         case $1 in
             --from) OPT_FROM=${2-}; shift 2 || main_die "--from needs a value" ;;
             --to)   OPT_TO=${2-};   shift 2 || main_die "--to needs a value" ;;
             --top)  OPT_TOP=${2-};  shift 2 || main_die "--top needs a value" ;;
+            --utc-offset) main_parse_offset "${2-}"; shift 2 || main_die "--utc-offset needs a value" ;;
+            --quality) OPT_QUALITY=1; shift ;;
             *) main_die "unknown option: $1" ;;
         esac
     done
@@ -112,15 +129,23 @@ cmd_start() {
 }
 
 cmd_stop() {
-    local pid i
+    local pid i tries=$(( STOP_TIMEOUT_SEC * 5 ))
     if ! daemon_is_running; then echo "Not running."; return 0; fi
     pid=$(cat "$PID_FILE" 2>/dev/null) || main_die "pid file missing"
     kill -TERM "$pid" 2>/dev/null || main_die "cannot signal pid $pid"
-    for (( i = 0; i < 50; i++ )); do
+    for (( i = 0; i < tries; i++ )); do
         if ! daemon_is_running; then echo "Stopped."; return 0; fi
         sleep 0.2
     done
-    main_die "daemon (pid $pid) did not stop within 10 s"
+    # A stuck monitor must never be unstoppable. SIGKILL is safe: recovery finishes the
+    # session and the tracked processes at the next start (status CRASHED / RECOVERED).
+    echo "The logger did not stop within ${STOP_TIMEOUT_SEC}s — forcing it (the session will be closed by recovery at the next start)." >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    for (( i = 0; i < 25; i++ )); do
+        if ! daemon_is_running; then echo "Stopped (forced)."; return 0; fi
+        sleep 0.2
+    done
+    main_die "daemon (pid $pid) could not be stopped"
 }
 
 cmd_status() {
@@ -184,8 +209,8 @@ cmd_processes() {
     case $mode in
         check)   storage_verify_processes ;;
         running) cmd_processes_running ;;
-        apps)    analyzer_top_apps "$from" "$to" "$top" User_Application | main_table ;;
-        bg)      analyzer_top_apps "$from" "$to" "$top" Background_Process | main_table ;;
+        apps)    activity_prepare "$from" "$to" 0; activity_apps User_Application "$top" | activity_pretty ;;
+        bg)      activity_prepare "$from" "$to" 0; activity_apps Background_Process "$top" | activity_pretty ;;
         *)
             if [[ ! -s $PROCESSES_FILE ]]; then echo "No finished processes recorded yet ($PROCESSES_FILE)."; return 0; fi
             analyzer_processes_view "$from" "$to" "$class" "$tail" | main_tsv ;;
@@ -208,16 +233,16 @@ cmd_processes_running() {
 
 cmd_stats() {
     main_parse_range "$@"
-    echo "== Summary =="; analyzer_summary "$OPT_FROM" "$OPT_TO" | main_table
-    echo; echo "== Top applications =="; analyzer_top_apps "$OPT_FROM" "$OPT_TO" "$OPT_TOP" | main_table
-    echo; echo "== Per day =="; analyzer_daily "$OPT_FROM" "$OPT_TO" | main_table
+    activity_prepare "$OPT_FROM" "$OPT_TO" "$OPT_OFFSET"
+    if (( OPT_QUALITY == 1 )); then activity_quality | activity_pretty; return; fi
+    activity_text_report "$OPT_TOP"
 }
 
 cmd_report() {
     local dir
     main_parse_range "$@"
     storage_init || main_die "cannot create directories"
-    dir=$(report_build "$OPT_FROM" "$OPT_TO" "$OPT_TOP") || main_die "report failed"
+    dir=$(report_build "$OPT_FROM" "$OPT_TO" "$OPT_TOP" "$OPT_OFFSET") || main_die "report failed"
     echo "Report created: $dir"
     ls -1 "$dir"
 }

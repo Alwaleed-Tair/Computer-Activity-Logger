@@ -65,7 +65,7 @@ check "long process logged after it ended" grep -q '"sleep"' "$DATA_DIR/processe
 echo "== analysis & report =="
 check "stats runs" "$MAIN" stats
 check "report runs" "$MAIN" report
-check "report has 7 files" bash -c "[ \$(ls '$REPORTS_DIR'/report_*/ | wc -l) -eq 7 ]"
+check "report has 8 files" bash -c "[ \$(ls '$REPORTS_DIR'/report_*/ | wc -l) -eq 8 ]"
 check "kernel threads are not logged" bash -c "! grep -qE 'kthreadd|kworker' '$DATA_DIR/processes.csv'"
 check "no command-line arguments leaked" bash -c "! grep -rq 4242 '$DATA_DIR'"
 

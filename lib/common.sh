@@ -236,5 +236,55 @@ function csvq(s) {
     gsub(/"/, "\"\"", s)
     return "\"" s "\""
 }
+# Safe identifiers (Session_ID) stay unquoted, exactly as in sessions.csv; anything else is quoted.
+function idq(s) { return (s ~ /^[A-Za-z0-9._-]+$/) ? s : csvq(s) }
 function in_range(d) { return !((from != "" && d < from) || (to != "" && d > to)) }
+# --- UTC date arithmetic (pure integer maths: mawk has no mktime/strftime) ----
+# days_from_civil(y, m, d) -> days since 1970-01-01   (y >= 1970 assumed)
+function days_from_civil(y, m, d,   era, yoe, doy, doe) {
+    if (m <= 2) y -= 1
+    era = int(y / 400); yoe = y - era * 400
+    doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    return era * 146097 + doe - 719468
+}
+# epoch("YYYY-MM-DD[ HH:MM:SS]") -> seconds since 1970 (UTC), or -1 if not a valid date
+function epoch(s,   y, m, d, hh, mm, ss) {
+    if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]( [0-9][0-9]:[0-9][0-9]:[0-9][0-9])?$/) return -1
+    y = substr(s, 1, 4) + 0; m = substr(s, 6, 2) + 0; d = substr(s, 9, 2) + 0
+    if (y < 1970 || m < 1 || m > 12 || d < 1 || d > 31) return -1
+    hh = 0; mm = 0; ss = 0
+    if (length(s) == 19) { hh = substr(s, 12, 2) + 0; mm = substr(s, 15, 2) + 0; ss = substr(s, 18, 2) + 0 }
+    if (hh > 23 || mm > 59 || ss > 59) return -1
+    return days_from_civil(y, m, d) * 86400 + hh * 3600 + mm * 60 + ss
+}
+# dayname(days since 1970-01-01) -> "YYYY-MM-DD"
+function dayname(di,   z, era, doe, yoe, y, doy, mp, d, m) {
+    z = di + 719468; era = int(z / 146097); doe = z - era * 146097
+    yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+    y = yoe + era * 400; doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+    mp = int((5 * doy + 2) / 153); d = doy - int((153 * mp + 2) / 5) + 1
+    m = (mp < 10 ? mp + 3 : mp - 9); if (m <= 2) y += 1
+    return sprintf("%04d-%02d-%02d", y, m, d)
+}
+# fmt_ts(epoch) -> "YYYY-MM-DD HH:MM:SS" (UTC)
+function fmt_ts(e,   di, r) {
+    di = int(e / 86400); r = e - di * 86400
+    return dayname(di) sprintf(" %02d:%02d:%02d", int(r / 3600), int((r % 3600) / 60), r % 60)
+}
+# daykey(epoch, offset_seconds) -> the calendar day of that instant at UTC+offset
+function daykey(e, off) { return dayname(int((e + off) / 86400)) }
+# day_segments(a, b, off): split [a,b) at day boundaries (UTC+off). Fills the global
+# arrays segd[] (day), sega[], segb[] and returns how many pieces there are.
+function day_segments(a, b, off,   d0, d1, d, n, lo, hi) {
+    n = 0
+    if (b <= a) return 0
+    d0 = int((a + off) / 86400); d1 = int((b - 1 + off) / 86400)
+    if (d1 - d0 > 4000) return 0                      # absurd interval: ignore
+    for (d = d0; d <= d1; d++) {
+        lo = d * 86400 - off; hi = lo + 86400
+        n++; segd[n] = dayname(d); sega[n] = (a > lo ? a : lo); segb[n] = (b < hi ? b : hi)
+    }
+    return n
+}
 AWK

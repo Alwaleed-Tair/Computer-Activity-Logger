@@ -7,7 +7,7 @@
 
 ثم يحوّل ذلك إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel.
 
-> الحالة: **v0.3 — Process Monitor مكتمل** (اكتشاف بدء/انتهاء العمليات، تمييز التطبيقات عن العمليات الخلفية، ربط بالجلسة، استعادة بعد موت المراقب) فوق Session Logger (`sessions.csv`، UTC).
+> الحالة: **v0.4 — Activity Analyzer مكتمل** (تقرير إحصائي: الجلسات، العمليات، أكثر التطبيقات استخدامًا، المدد والمتوسطات، الإحصاءات اليومية) فوق Process Monitor وSession Logger.
 > التصميم الكامل في [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## الخصوصية (ملتزمون بها)
@@ -32,11 +32,11 @@ Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df
 ./main.sh consent        # اقرأ الإشعار واكتب yes للموافقة
 ./main.sh start          # يبدأ في الخلفية
 ./main.sh status         # الحالة والمسارات وحجم البيانات
-./main.sh stats          # إحصائيات في الطرفية
+./main.sh stats          # تقرير النشاط الكامل في الطرفية (أضف --utc-offset +03:00 لحدود اليوم المحلية)
 ./main.sh report         # ينشئ تقريرًا في reports/report_<التاريخ>/
 ./main.sh sessions       # سجل الجلسات (UTC) — أضف --local أو --tz Asia/Riyadh للتوقيت المحلي
 ./main.sh processes      # آخر العمليات المنتهية — أضف --running (الجارية الآن) أو --apps أو --background أو --check
-./main.sh stop           # يوقف ويحفظ كل السجلات المفتوحة
+./main.sh stop           # يوقف ويحفظ كل السجلات المفتوحة (إن لم يستجب خلال STOP_TIMEOUT_SEC يُفرض إيقافه ويُغلق التعافي جلسته عند التشغيل التالي)
 ```
 
 خيارات مفيدة: `stats --from 2026-10-01 --to 2026-10-31 --top 5` ·
@@ -67,14 +67,15 @@ lib/
   storage.sh           كتابة CSV وملفات الحالة (ذرّية) + إعادة المحاولة عند فشل الكتابة
   recovery.sh          استعادة الجلسة بعد kill -9 أو انقطاع الكهرباء
   daemon.sh            الحلقة الرئيسية والإشارات والإغلاق الآمن
-  analyzer.sh          الإحصائيات (awk)
+  analyzer.sh          عروض الصفوف: الجلسات والعمليات
+  activity.sh          Activity Analyzer: الإحصاءات والملخص والتقرير (awk/sort/uniq، قراءة فقط)
   report.sh            تقارير Excel
 conf/                  ignore.list.example · apps.map.example (انسخهما بدون .example للتخصيص)
 data/                  السجلات الخام: sessions.csv · processes.csv · process_details.csv
 reports/               التقارير المولّدة
 state/                 حالة التشغيل (pid، heartbeat…) — تُنشأ تلقائيًا ولا تُرفع إلى git
 install/               install.sh · uninstall.sh · قوالب systemd و autostart
-tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (161) · smoke.sh
+tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (163) · test_activity.sh (145) · smoke.sh
 docs/DESIGN.md         وثيقة التصميم الكاملة
 ```
 
@@ -149,6 +150,31 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 ملف بترويسة غريبة يُنقل إلى `sessions.csv.invalid.<وقت>` ولا يُكتب فوقه؛ ولا يُحذف أي سجل سابق إلا بأمر `purge`.
 للفحص: `./main.sh sessions --check`.
 
+### التحليل: Activity Analyzer (`lib/activity.sh`)
+
+يقرأ `sessions.csv` و`processes.csv` و`process_details.csv` **للقراءة فقط** (لا يعدّل البيانات الخام أبدًا، ويثبت ذلك الاختبار بمجاميع sha256) ويحسب بـ `awk` و`sort` و`uniq`.
+
+```bash
+./main.sh stats [--from 2026-10-01] [--to 2026-10-31] [--top 10] [--utc-offset +03:00]   # التقرير في الطرفية
+./main.sh stats --quality        # ما الذي تُجوهل أو لم يكن اكتمالًا طبيعيًا
+./main.sh report [نفس الخيارات]   # ثمانية ملفات في reports/report_<وقت>/
+```
+
+**ثلاثة مقاييس مختلفة (لا تُخلط):**
+
+| المقياس | معناه | الاستعمال |
+|---|---|---|
+| **Total Usage Duration** | مجموع مدد الجلسات المغلقة (دخول ← خروج) | «كم استخدمتُ الجهاز» |
+| **Active_Seconds** (للتطبيق) | **اتحاد** فترات كل عمليات التطبيق | وقت التطبيق الفعلي؛ عشر عمليات متصفح معًا لساعة = ساعة |
+| **Process_Seconds** | **مجموع** مدد العمليات | للشفافية فقط؛ العمليات المتزامنة تتراكم فلا يصلح وقتَ استخدام |
+
+**الاكتمال:** المتوسطات (`Average Process Duration`، متوسط مدة التطبيق) تستخدم عمليات `COMPLETED` فقط. أما `SESSION_END` (حدٌّ أدنى) و`RECOVERED` (نهاية مقدَّرة) فتُحصى وتُذكر في التقرير ولا تدخل المتوسطات. الجلسات `ACTIVE`/`INTERRUPTED` بلا مدة فلا تدخل أي مجموع. إن لم توجد عمليات مكتملة يظهر المتوسط **فارغًا / n/a** لا صفرًا.
+
+**الإطلاق (Launch)** = جذر تطبيق بدأ أثناء المراقبة؛ ما «وُجد يعمل» يُحصى في `Already_Running` لا كإطلاق، ويُقاس وقته من لحظة رؤيته لا من بدئه الحقيقي. العمليات المساعدة (renderers…) تُدمج في تطبيقها؛ وصفوف بلا تفاصيل تبقى `Unknown` ولا تُدمج تخمينًا.
+
+**الأيام:** العدّ (جلسات، عمليات، إطلاقات) في **يوم البدء**، والمدد **تُقسَّم عند منتصف الليل** وتُقصّ على الفترة المطلوبة. `--utc-offset` يحرّك حدود اليوم فقط (المخزَّن يبقى UTC).
+
+**ملفات `report`:** `01_summary` · `02_most_used_applications` · `03_background_processes` · `04_daily_usage` · `05_sessions` (بعدد العمليات لكل جلسة) · `06_process_durations` (مدة كل عملية + هل انتهت طبيعيًا) · `07_data_quality` · `08_report.txt` (التقرير الكامل: Total Sessions / Total Processes / Most Used Applications / Total Usage Duration / Average Process Duration / Daily Usage Statistics).
 ### فتح التقارير في Excel
 افتح ملفات `reports/report_*/*.csv` مباشرة. الترميز UTF-8 مع BOM فيظهر العربي صحيحًا،
 وأعمدة `*_sec` رقمية للجمع والـ Pivot، وأعمدة `*_hms` للقراءة.
@@ -165,8 +191,8 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 
 - **الدقة:** العمليات الأقصر من `INTERVAL_SEC` قد لا تُلتقط، ووقت الانتهاء هو وقت *اكتشافه* (تأخير حتى فاصل واحد).
 - العمليات التي كانت تعمل قبل بدء الجلسة تُوسم `started_before_session=yes`.
-- تقرير يومي: العملية العابرة لمنتصف الليل تُحتسب في يوم بدايتها (تقسيمها مؤجل).
-- لم تُنفَّذ بعد (انظر `docs/DESIGN.md` §14): ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي، تقسيم العملية العابرة لمنتصف الليل على يومين.
+- التقارير اليومية تقسّم الجلسات والعمليات العابرة لمنتصف الليل على يومين؛ الإحصاءات اليومية بتوقيت UTC ما لم تُمرَّر `--utc-offset` (إزاحة ثابتة، بلا توقيت صيفي).
+- لم تُنفَّذ بعد (انظر `docs/DESIGN.md` §14): ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي، مناطق زمنية بالاسم في الإحصاءات اليومية.
 
 ## الاختبار
 
