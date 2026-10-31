@@ -115,7 +115,7 @@ else
 fi
 
 section "4. nothing leaked"
-eq "no logger process left anywhere" 0 "$(pgrep -f -c -- 'main.sh daemon' || true)"
+eq "no logger process left anywhere" 0 "$(pgrep -f -c -- '^(/usr/bin/)?bash .*/main\.sh daemon$' || true)"
 
 printf '\n%d checks, %d failed' "$TOTAL" "$FAILS"; [[ ${SKIPPED:-0} == 1 ]] && printf ' (section 3 skipped)'; printf '\n'
 exit $(( FAILS > 0 ))
