@@ -41,11 +41,11 @@ wait
 sleep 2
 "$MAIN" stop >/dev/null
 PFILE=$(ls "$DATA_DIR"/processes_*.csv 2>/dev/null | head -n1)
-SFILE=$(ls "$DATA_DIR"/sessions_*.csv 2>/dev/null | head -n1)
+SFILE="$DATA_DIR/sessions.csv"
 check "processes CSV exists" test -s "${PFILE:-/nonexistent}"
 check "CSV starts with UTF-8 BOM" bash -c "head -c3 '${PFILE:-/x}' | od -An -tx1 | grep -q 'ef bb bf'"
 check "process with a space in its name was logged" grep -q 'My App' "${PFILE:-/x}"
-check "session closed with reason logout" grep -q 'logout' "${SFILE:-/x}"
+check "session row closed as COMPLETED" grep -q ',COMPLETED$' "${SFILE:-/x}"
 check "state files removed after clean stop" test ! -e "$STATE_DIR/session.state"
 
 echo "== crash recovery (kill -9) =="
@@ -57,7 +57,7 @@ sleep 1
 check "stale session file remains after kill -9" test -s "$STATE_DIR/session.state"
 "$MAIN" start >/dev/null
 sleep 2
-check "session recovered as crash_recovered" grep -q 'crash_recovered' "$DATA_DIR"/sessions_*.csv
+check "session recovered as CRASHED" grep -q ',CRASHED$' "$DATA_DIR/sessions.csv"
 kill "$LONG" 2>/dev/null; sleep 2
 "$MAIN" stop >/dev/null
 check "long process logged after it ended" grep -q '"sleep"' "$DATA_DIR"/processes_*.csv

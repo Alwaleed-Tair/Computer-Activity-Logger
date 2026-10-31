@@ -25,7 +25,7 @@ report_build() {
     report_write "$dir/01_summary.csv"   analyzer_summary  "$from" "$to"        || return 1
     report_write "$dir/02_top_apps.csv"  analyzer_top_apps "$from" "$to" "$top" || return 1
     report_write "$dir/03_daily.csv"     analyzer_daily    "$from" "$to"        || return 1
-    report_write "$dir/05_sessions.csv"  analyzer_raw sessions  "$from" "$to"   || return 1
+    report_write "$dir/05_sessions.csv"  analyzer_sessions_csv "$from" "$to"           || return 1
     report_write "$dir/06_processes.csv" analyzer_raw processes "$from" "$to"   || return 1
     log_info "report written to $dir"
     printf '%s\n' "$dir"

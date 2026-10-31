@@ -4,8 +4,11 @@
 # -----------------------------------------------------------------------------
 # A leftover $SESSION_FILE means the previous daemon never closed its session.
 # We use the last heartbeat as the best estimate of "when it died":
-#   * boot id changed  -> reboot / power loss  => power_loss_recovered
-#   * boot id same     -> the daemon itself died => crash_recovered
+#   * boot id changed  -> reboot / power loss  => Status POWER_LOSS
+#   * boot id same     -> the daemon itself died => Status CRASHED
+# The ACTIVE row in sessions.csv is UPDATED (end time = heartbeat), not
+# duplicated. Any other ACTIVE row we cannot explain (state file lost) is
+# marked INTERRUPTED with an empty end time.
 # Tracked processes (active.tsv) are either:
 #   * still alive (same boot, same start time) -> carried into the new session
 #   * gone                                      -> closed at the heartbeat time
@@ -14,15 +17,17 @@
 
 recovery_run() {
     local hb_epoch hb_up hb_boot hb_session hb_count hb_paused
-    local same_boot=0 reason rec dur c_start now_boot kept=0 closed=0
+    local same_boot=0 reason status rec dur c_start now_boot kept=0 closed=0
 
     if [[ ! -f $SESSION_FILE ]]; then
         storage_clear_state          # stray files without a session: discard
+        sessionlog_reap_orphans ""   # ACTIVE rows nobody owns any more
         return 0
     fi
     if ! session_load_state; then
         log_warn "unreadable $SESSION_FILE — discarding"
         storage_clear_state
+        sessionlog_reap_orphans ""
         return 0
     fi
 
@@ -36,7 +41,8 @@ recovery_run() {
     common_boot_id now_boot
     now_boot=${now_boot:0:8}
     if [[ $RS_BOOT == "$now_boot" ]]; then same_boot=1; reason=crash_recovered; else reason=power_loss_recovered; fi
-    log_warn "recovering session $RS_ID (reason=$reason, last heartbeat epoch=$hb_epoch)"
+    status=$(session_status_for "$reason")
+    log_warn "recovering session $RS_ID (status=$status, last heartbeat epoch=$hb_epoch)"
 
     # 1) Tracked processes.
     if [[ -r $ACTIVE_FILE ]]; then
@@ -63,13 +69,16 @@ recovery_run() {
         done <"$ACTIVE_FILE"
     fi
 
-    # 2) The interrupted session itself.
+    # 2) The interrupted session: update its ACTIVE row in sessions.csv.
     dur=$(( hb_epoch - RS_START_EPOCH ))
     if (( dur < 0 )); then dur=0; fi
-    storage_append_session "$RS_ID" "${RS_USER:-$CAL_USER}" "${RS_HOST:-$CAL_HOST}" "$RS_BOOT" \
-        "$RS_START_EPOCH" "$hb_epoch" "$dur" "${hb_paused:-0}" "$reason" "${hb_count:-0}"
+    sessionlog_close "$RS_ID" "$status" "$hb_epoch" "$RS_START_EPOCH" "$dur" \
+        "${RS_USER:-$CAL_USER}" "${RS_UID:-$CAL_UID}" \
+        || log_err "could not update interrupted session $RS_ID"
 
     storage_clear_state
+    # 3) Anything else still ACTIVE has no owner.
+    sessionlog_reap_orphans ""
     log_info "recovery done: $closed process rows closed, $kept still running"
     return 0
 }

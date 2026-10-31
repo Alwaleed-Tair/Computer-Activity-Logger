@@ -10,9 +10,9 @@
 # =============================================================================
 
 PROCESSES_HEADER='session_id,username,pid,ppid,app_name,process_name,category,start_time,end_time,start_epoch,end_epoch,duration_sec,duration_hms,paused_sec,active_sec,started_before_session,end_reason'
-SESSIONS_HEADER='session_id,username,hostname,boot_id,start_time,end_time,start_epoch,end_epoch,duration_sec,duration_hms,paused_sec,end_reason,process_count,interval_sec,version'
 
 # Rows that could not be written yet: entries are "kind<TAB>epoch<TAB>line".
+# (kind is "processes"; the session log has its own locking in sessionlog.sh.)
 declare -ga STORAGE_PENDING=()
 STORAGE_PENDING_MAX=10000
 
@@ -28,7 +28,7 @@ storage_write_line() {
     local kind=$1 epoch=$2 line=$3 month file header
     printf -v month '%(%Y-%m)T' "$epoch"
     file="$DATA_DIR/${kind}_${month}.csv"
-    if [[ $kind == processes ]]; then header=$PROCESSES_HEADER; else header=$SESSIONS_HEADER; fi
+    header=$PROCESSES_HEADER   # only the processes log is monthly; sessions.csv lives in sessionlog.sh
     if [[ ! -s $file ]]; then
         # UTF-8 BOM so Microsoft Excel shows non-ASCII text correctly.
         printf '\xEF\xBB\xBF%s\n' "$header" >"$file" || return 1
@@ -82,19 +82,6 @@ storage_append_process() {
         "$st" "$et" "$R_START_EPOCH" "$end_epoch" "$dur" "$dh" "$R_PAUSED" "$active" \
         "$pre" "$reason"
     storage_append processes "$end_epoch" "$REPLY"
-}
-
-# storage_append_session ID USER HOST BOOT START_EPOCH END_EPOCH DURATION PAUSED REASON COUNT
-storage_append_session() {
-    local id=$1 user=$2 host=$3 boot=$4 s_epoch=$5 e_epoch=$6 dur=$7 paused=$8 reason=$9 count=${10}
-    local st et dh
-    common_fmt_ts st "$s_epoch"
-    common_fmt_ts et "$e_epoch"
-    common_fmt_hms dh "$dur"
-    csv_row ttttrrnnnrnrnnt \
-        "$id" "$user" "$host" "$boot" "$st" "$et" "$s_epoch" "$e_epoch" \
-        "$dur" "$dh" "$paused" "$reason" "$count" "$INTERVAL_SEC" "$CAL_VERSION"
-    storage_append sessions "$e_epoch" "$REPLY"
 }
 
 # storage_save_active — atomically persist the tracked-process table.

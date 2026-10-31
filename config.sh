@@ -12,8 +12,9 @@
 : "${CAL_ROOT:?config.sh must be sourced from main.sh (CAL_ROOT is not set)}"
 
 # --- Identity / version ------------------------------------------------------
-CAL_VERSION="0.1.0"
-CAL_USER="${CAL_USER:-$(id -un)}"
+CAL_VERSION="0.2.0"
+CAL_USER="${CAL_USER:-$(whoami)}"   # current user name (whoami)
+CAL_UID="${CAL_UID:-$EUID}"                # numeric user id (UID)
 CAL_HOST="${CAL_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
 # --- Monitoring behaviour ----------------------------------------------------
@@ -47,6 +48,13 @@ ACTIVE_FILE="$STATE_DIR/active.tsv"      # processes currently being tracked
 HEARTBEAT_FILE="$STATE_DIR/heartbeat"    # last time the daemon was alive
 LOG_FILE="$STATE_DIR/cal.log"            # the program's own diagnostic log
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-1048576}"
+
+# --- Session log (sessions.csv) ----------------------------------------------
+# ONE file for all sessions. A row is written when a session starts and is
+# updated in place when it ends. Everything stored in it is UTC.
+# Concurrent writers are serialised with flock on SESSIONS_LOCK.
+SESSIONS_FILE="${SESSIONS_FILE:-$DATA_DIR/sessions.csv}"
+SESSIONS_LOCK="${SESSIONS_LOCK:-$DATA_DIR/.sessions.lock}"
 
 # --- Safety ------------------------------------------------------------------
 MIN_FREE_MB="${MIN_FREE_MB:-50}"         # warn when free disk space drops below

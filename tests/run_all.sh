@@ -22,6 +22,9 @@ else
     echo "== shellcheck not installed — skipped =="
 fi
 
+echo "== session logger tests =="
+bash tests/test_sessions.sh || rc=1
+
 echo "== smoke test =="
 bash tests/smoke.sh || rc=1
 exit "$rc"

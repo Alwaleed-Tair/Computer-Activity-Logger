@@ -73,8 +73,56 @@ common_uptime() {
     printf -v "$1" '%s' "${_up%.*}"
 }
 
-# common_fmt_ts VAR EPOCH — "YYYY-MM-DD HH:MM:SS" (recognised by Excel as a date).
-common_fmt_ts() { printf -v "$1" '%(%F %T)T' "$2"; }
+# common_fmt_ts VAR EPOCH — "YYYY-MM-DD HH:MM:SS" in UTC (Excel reads it as a date).
+common_fmt_ts() { local _d _t; common_utc_date_time _d _t "$2"; printf -v "$1" "%s %s" "$_d" "$_t"; }
+
+# --- UTC time (pure Bash arithmetic: no fork, no dependence on TZ) -------------
+# All persisted timestamps are UTC. Local time is only a *display* concern
+# (see `./main.sh sessions --local`).
+
+# common_utc_date_time DATE_VAR TIME_VAR EPOCH
+#   -> DATE_VAR="YYYY-MM-DD", TIME_VAR="HH:MM:SS" (UTC)
+common_utc_date_time() {
+    local __e=$3 __days __rem __z __era __doe __yoe __y __doy __mp __d __m
+    if (( __e < 0 )); then __e=0; fi
+    __days=$(( __e / 86400 )); __rem=$(( __e % 86400 ))
+    # Civil-from-days (H. Hinnant's algorithm), valid for the whole Unix era.
+    __z=$(( __days + 719468 )); __era=$(( __z / 146097 )); __doe=$(( __z - __era * 146097 ))
+    __yoe=$(( (__doe - __doe / 1460 + __doe / 36524 - __doe / 146096) / 365 ))
+    __y=$(( __yoe + __era * 400 ))
+    __doy=$(( __doe - (365 * __yoe + __yoe / 4 - __yoe / 100) ))
+    __mp=$(( (5 * __doy + 2) / 153 ))
+    __d=$(( __doy - (153 * __mp + 2) / 5 + 1 ))
+    if (( __mp < 10 )); then __m=$(( __mp + 3 )); else __m=$(( __mp - 9 )); fi
+    if (( __m <= 2 )); then __y=$(( __y + 1 )); fi
+    printf -v "$1" '%04d-%02d-%02d' "$__y" "$__m" "$__d"
+    printf -v "$2" '%02d:%02d:%02d' $(( __rem / 3600 )) $(( __rem % 3600 / 60 )) $(( __rem % 60 ))
+}
+
+# common_utc_to_epoch VAR "YYYY-MM-DD" "HH:MM:SS" — inverse of the above (UTC).
+# Returns 1 (VAR untouched) when the text is not a valid date/time.
+common_utc_to_epoch() {
+    local __y __m __d __hh __mm __ss __era __yoe __doy __doe __days __mp
+    if ! [[ $2 =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then return 1; fi
+    __y=$(( 10#${BASH_REMATCH[1]} )); __m=$(( 10#${BASH_REMATCH[2]} )); __d=$(( 10#${BASH_REMATCH[3]} ))
+    if ! [[ $3 =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then return 1; fi
+    __hh=$(( 10#${BASH_REMATCH[1]} )); __mm=$(( 10#${BASH_REMATCH[2]} )); __ss=$(( 10#${BASH_REMATCH[3]} ))
+    if (( __m < 1 || __m > 12 || __d < 1 || __d > 31 || __hh > 23 || __mm > 59 || __ss > 59 )); then return 1; fi
+    if (( __m <= 2 )); then __y=$(( __y - 1 )); fi
+    __era=$(( __y / 400 )); __yoe=$(( __y - __era * 400 ))
+    if (( __m > 2 )); then __mp=$(( __m - 3 )); else __mp=$(( __m + 9 )); fi
+    __doy=$(( (153 * __mp + 2) / 5 + __d - 1 ))
+    __doe=$(( __yoe * 365 + __yoe / 4 - __yoe / 100 + __doy ))
+    __days=$(( __era * 146097 + __doe - 719468 ))
+    printf -v "$1" '%s' $(( __days * 86400 + __hh * 3600 + __mm * 60 + __ss ))
+}
+
+# common_fmt_minutes VAR SECONDS — minutes with two decimals ("2.08").
+common_fmt_minutes() {
+    local _s=$2
+    if (( _s < 0 )); then _s=0; fi
+    printf -v "$1" '%d.%02d' $(( _s / 60 )) $(( (_s % 60) * 100 / 60 ))
+}
 
 # common_fmt_hms VAR SECONDS — "HH:MM:SS" (hours may exceed 24).
 common_fmt_hms() {
@@ -161,3 +209,32 @@ common_sleep() {
     fi
     return 0
 }
+
+# --- Awk helpers (shared by analyzer.sh and sessionlog.sh) ---------------------
+# Prepended to every awk program: CSV parsing, hms formatting, date-range filter.
+read -r -d '' AWK_LIB <<'AWK' || true
+# Split one RFC-4180 CSV line into out[1..n]; returns n.
+function csv_split(line, out,    n, i, len, c, f, inq) {
+    split("", out); n = 0; f = ""; inq = 0; len = length(line)
+    for (i = 1; i <= len; i++) {
+        c = substr(line, i, 1)
+        if (inq) {
+            if (c == "\"") {
+                if (substr(line, i + 1, 1) == "\"") { f = f "\""; i++ } else inq = 0
+            } else f = f c
+        } else if (c == "\"") inq = 1
+        else if (c == ",") { out[++n] = f; f = "" }
+        else f = f c
+    }
+    out[++n] = f
+    return n
+}
+function hms(s) { return sprintf("%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60) }
+# Quote a text field for CSV output (and block formula injection).
+function csvq(s) {
+    if (s ~ /^[=+@-]/) s = "'" s
+    gsub(/"/, "\"\"", s)
+    return "\"" s "\""
+}
+function in_range(d) { return !((from != "" && d < from) || (to != "" && d > to)) }
+AWK

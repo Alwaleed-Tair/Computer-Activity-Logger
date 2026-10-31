@@ -36,13 +36,13 @@ Key design rules:
 ```
 main.sh            CLI entry point (dispatches commands to lib/)
 config.sh          all settings (env vars / config.local.sh override)
-lib/*.sh           modules (common, consent, collector, detector, session,
+lib/*.sh           modules (common, consent, collector, detector, session, sessionlog,
                    storage, recovery, daemon, analyzer, report)
 conf/              *.example lists (ignore.list, apps.map)
 data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
 state/             runtime state (git-ignored)
 install/           install.sh, uninstall.sh, systemd/autostart templates
-tests/             run_all.sh, smoke.sh
+tests/             run_all.sh, test_sessions.sh (session logger), smoke.sh (end-to-end)
 docs/              DESIGN.md
 ```
 
@@ -50,7 +50,9 @@ docs/              DESIGN.md
 
 ```bash
 bash tests/run_all.sh        # bash -n + shellcheck (if installed) + sandboxed smoke test
+bash tests/test_sessions.sh   # session logger tests (75 checks)
 bash tests/smoke.sh          # smoke test only
+./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
 ```
 
@@ -69,3 +71,10 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - Develop on branch `claude/exciting-maxwell-irr563`; commit with clear messages and push to it.
 - Do not open a pull request unless asked.
 - Follow the phase order in DESIGN §14 (0 → 1 → 2 → 3 → 4 → 5 → 6) and satisfy each phase's Definition of Done before moving on.
+
+## Session log rules (sessions.csv)
+
+- Exact columns: `Session_ID,Username,User_ID,Login_Date,Login_Time,Logout_Date,Logout_Time,Duration_Seconds,Status`. Don't add columns; derived values (minutes, local time) are computed on display.
+- **All stored times are UTC.** Use `common_utc_date_time` / `common_utc_to_epoch` (pure Bash). Never format stored times with `printf '%(…)T'` (depends on an exported `TZ`) or localtime.
+- Every write to `sessions.csv` goes through `lib/sessionlog.sh` (flock + temp file + atomic `mv`). Never `>>`/`sed -i` it from elsewhere. Rows are never deleted except by `purge`.
+- Helpers that write to a caller-supplied variable via `printf -v "$1"` must name their own locals with a `__` prefix (dynamic scoping would otherwise capture the write).

@@ -22,7 +22,7 @@ export CAL_ROOT
 # --- Load configuration and modules -----------------------------------------
 # shellcheck source=config.sh
 source "$CAL_ROOT/config.sh"
-for _module in common consent storage collector detector session recovery daemon analyzer report; do
+for _module in common consent storage sessionlog collector detector session recovery daemon analyzer report; do
     # shellcheck source=/dev/null
     source "$CAL_ROOT/lib/${_module}.sh"
 done
@@ -42,6 +42,8 @@ Commands:
   stop                          Stop it (open records are saved first)
   daemon                        Run in the foreground (used by systemd)
   status                        Show state, paths and data size
+  sessions [--local|--tz ZONE] [--from D] [--to D] [--status S] [--check]
+                                Session log (UTC by default; --local = this machine's zone)
   stats  [--from D] [--to D] [--top N]    Usage statistics in the terminal
   report [--from D] [--to D] [--top N]    Excel-ready CSV report in reports/
   purge  --all | --before YYYY-MM-DD [--yes]   Delete logged data
@@ -121,13 +123,37 @@ cmd_status() {
     echo "Computer Activity Logger v${CAL_VERSION}  (user: $CAL_USER)"
     if consent_is_granted; then echo "Consent  : granted"; else echo "Consent  : NOT granted (run ./main.sh consent)"; fi
     if daemon_is_running; then echo "Daemon   : running (pid $(cat "$PID_FILE" 2>/dev/null))"; else echo "Daemon   : stopped"; fi
+    if daemon_is_running && [[ -r $SESSION_FILE ]] && session_load_state; then echo "Session  : $RS_ID (ACTIVE, started $(date -u -d "@$RS_START_EPOCH" "+%F %T") UTC)"; fi
     echo "Interval : ${INTERVAL_SEC}s   Min duration: ${MIN_DURATION_SEC}s"
+    echo "Sessions : $SESSIONS_FILE (UTC)"
     echo "Data     : $DATA_DIR"
     echo "Reports  : $REPORTS_DIR"
     files=$(find "$DATA_DIR" -maxdepth 1 -name '*.csv' 2>/dev/null | wc -l)
     size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
     echo "Files    : ${files} CSV file(s), ${size:-0}"
     echo "Collects : process names + start/end times + durations (no arguments, no content)"
+}
+
+cmd_sessions() {
+    local zone=utc status="" check=0 from="" to=""
+    while (( $# > 0 )); do
+        case $1 in
+            --local)  zone=local ;;
+            --utc)    zone=utc ;;
+            --tz)     zone=${2-}; [[ -n $zone ]] || main_die "--tz needs a zone name"; shift ;;
+            --from)   from=${2-}; shift ;;
+            --to)     to=${2-}; shift ;;
+            --status) status=${2-}; shift ;;
+            --check)  check=1 ;;
+            *) main_die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    main_valid_date "$from" || main_die "invalid --from date"
+    main_valid_date "$to" || main_die "invalid --to date"
+    if (( check == 1 )); then sessionlog_verify; return; fi
+    if [[ ! -s $SESSIONS_FILE ]]; then echo "No sessions recorded yet ($SESSIONS_FILE)."; return 0; fi
+    analyzer_sessions_view "$from" "$to" "$status" "$zone" | if command -v column >/dev/null 2>&1; then column -t -s $'\t'; else cat; fi
 }
 
 cmd_stats() {
@@ -162,7 +188,7 @@ cmd_purge() {
     if [[ $mode == before ]]; then
         main_valid_date "$before" && [[ -n $before ]] || main_die "invalid --before date"
         cutoff=${before:0:7}
-        echo "Files of months earlier than $cutoff (month granularity) will be deleted."
+        echo "Process files of months earlier than $cutoff, and session rows with Login_Date < $before, will be deleted."
     else
         echo "ALL CSV data in $DATA_DIR will be deleted."
     fi
@@ -170,11 +196,17 @@ cmd_purge() {
         read -r -p "Type 'yes' to confirm: " ans
         [[ $ans == yes ]] || { echo "Cancelled."; return 0; }
     fi
-    for f in "$DATA_DIR"/processes_*.csv "$DATA_DIR"/sessions_*.csv; do
+    for f in "$DATA_DIR"/processes_*.csv; do
         [[ -f $f ]] || continue
         month=${f##*_}; month=${month%.csv}
         if [[ $mode == all || $month < $cutoff ]]; then rm -f -- "$f"; echo "deleted $f"; fi
     done
+    # sessions.csv is a single file: drop everything, or only the closed rows before the date.
+    if [[ $mode == all ]]; then
+        rm -f -- "$SESSIONS_FILE" "$SESSIONS_FILE.bak" && echo "deleted $SESSIONS_FILE"
+    else
+        echo "removed $(sessionlog_purge_before "$before") session row(s) from $SESSIONS_FILE"
+    fi
 }
 
 cmd_doctor() {
@@ -205,6 +237,7 @@ main() {
         stop)    cmd_stop ;;
         status)  cmd_status ;;
         consent) cmd_consent "$@" ;;
+        sessions) cmd_sessions "$@" ;;
         stats)   cmd_stats "$@" ;;
         report)  cmd_report "$@" ;;
         purge)   cmd_purge "$@" ;;

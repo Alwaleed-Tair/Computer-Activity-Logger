@@ -567,3 +567,49 @@ Ubuntu 22.04/24.04، Debian 12، Fedora (أحدث)، Arch؛ Bash 4.4 و5.x؛ م�
 | تقسيم العملية عند منتصف الليل | يوميًا | مؤجل: تُحتسب في يوم بدايتها |
 
 **ما نُفّذ من خطة §14:** المراحل 0 و1 و2 و4 كاملة تقريبًا، والمرحلة 3 جزئيًا (الموافقة والـ CLI والتثبيت)، والمرحلة 5 (CSV + BOM + حماية حقن الصيغ بدون `.xlsx` وبدون فاصل `;`).
+
+---
+
+## 17. Session Logger (v0.2)
+
+يحلّ هذا القسم محلّ مخطط `sessions_YYYY-MM.csv` الوارد في §7.3 وصفوف الجلسات الوارد ذكرها في §8.
+
+**الملف:** `data/sessions.csv` — ملف واحد، تُضاف صف عند بداية الجلسة ويُحدَّث **نفس الصف** عند نهايتها.
+
+| العمود | ملاحظة |
+|---|---|
+| `Session_ID` | `YYYYMMDDTHHMMSSZ-<pid>-<4 hex>`؛ يُتحقق من عدم وجوده في الملف قبل الاستخدام |
+| `Username`, `User_ID` | من `whoami` و`$EUID` |
+| `Login_Date`, `Login_Time` | UTC |
+| `Logout_Date`, `Logout_Time` | UTC؛ فارغان أثناء الجلسة (ولـ `INTERRUPTED`) |
+| `Duration_Seconds` | من الساعة الرتيبة في المسار الطبيعي؛ وفي الاستعادة = آخر heartbeat − بداية الجلسة |
+| `Status` | `ACTIVE` · `COMPLETED` · `ABORTED` · `CRASHED` · `POWER_LOSS` · `INTERRUPTED` |
+
+**الدقائق** ليست عمودًا في الملف (حسب المواصفات) بل تُحسب عند العرض (`main.sh sessions`) وتظهر في `05_sessions.csv` بالتقرير كعمود `Duration_Minutes`.
+
+**التوقيت:** يُخزَّن كل شيء UTC بحساب صحيح خالص في Bash (`common_utc_date_time` / `common_utc_to_epoch`، بلا `TZ` ولا `date`) —
+لأن `printf '%(...)T'` تعتمد على متغير `TZ` المُصدَّر. العرض المحلي فقط: `sessions --local` أو `--tz Asia/Riyadh`.
+وبالتالي صارت أوقات `processes_*.csv` UTC أيضًا (وفيها `start_epoch`/`end_epoch` للمطابقة).
+
+**دورة الحياة والاستعادة**
+
+```
+session_begin  : sessionlog_start (صف ACTIVE)  ثم  session.state
+daemon يعمل    : heartbeat كل دورة
+إيقاف نظيف     : sessionlog_close(COMPLETED | ABORTED)              ← يحدّث نفس الصف
+kill -9        : التشغيل التالي: recovery → sessionlog_close(CRASHED, نهاية = heartbeat)
+إعادة إقلاع    : boot_id مختلف → sessionlog_close(POWER_LOSS, نهاية = heartbeat)
+فُقد session.state : sessionlog_reap_orphans → INTERRUPTED (نهاية فارغة)
+```
+
+**الحماية من التلف والتزامن (`lib/sessionlog.sh`)**
+1. قفل `flock -x` على `data/.sessions.lock` لكل قراءة-تعديل-كتابة (مهلة 15 ث، re-entrant داخل العملية).
+2. التحديث: awk → ملف مؤقت في نفس المجلد → فحص أن عدد الأسطر لم يتغير → نسخ `sessions.csv.bak` → `mv` ذرّي.
+3. بدء الجلسة idempotent؛ وإغلاق الصف المغلق لا يفعل شيئًا.
+4. السطر الأخير بلا `\n` (كتابة ممزّقة) يُصلَح قبل أي إضافة حتى لا يلتصق به الصف الجديد.
+5. ترويسة غير متوقعة ⇒ نقل الملف إلى `sessions.csv.invalid.<وقت>` وبدء ملف جديد (لا حذف).
+6. إن اختفى صف الجلسة عند إغلاقها يُضاف صف مغلق كامل بدل ضياع الجلسة.
+7. `main.sh sessions --check` يتحقق من: الترويسة، 9 حقول، `Session_ID` صالح وفريد، UID رقمي، صيغ التواريخ، الحالة، اتساق الحقول مع الحالة، وأن الخروج بعد الدخول.
+8. `purge --before` وحده يحذف صفوفًا (المغلقة فقط).
+
+**لوحظ أثناء التنفيذ:** دوال الأدوات التي تكتب في متغير يمرّره المستدعي (`printf -v "$1"`) يجب أن تُسمّي متغيراتها المحلية بادئة `__` مميزة، وإلا كتبت في متغيرها المحلي إن وافق اسمه اسم الوجهة (النطاق الديناميكي في Bash).
