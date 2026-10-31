@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Computer Activity Logger
+Comment=Logs process start/end times (runs only with the user's recorded consent)
+Exec=@CAL_ROOT@/main.sh start
+Terminal=false
+X-GNOME-Autostart-enabled=true

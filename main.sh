@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# =============================================================================
+# main.sh — Computer Activity Logger: command-line entry point
+# -----------------------------------------------------------------------------
+# Usage: ./main.sh <command> [options]      (see ./main.sh help)
+#
+# This file only parses commands and wires the modules in lib/ together;
+# all real work lives in the modules.
+#
+# Error handling: `set -u -o pipefail` (+ an ERR trap that only LOGS inside the
+# daemon). `set -e` is intentionally NOT used: one failing command must never
+# stop the logger or lose records that are still in memory.
+# =============================================================================
+set -u -o pipefail
+set -E
+umask 077
+
+# Resolve the project root even when called through a symlink or another cwd.
+CAL_ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+export CAL_ROOT
+
+# --- Load configuration and modules -----------------------------------------
+# shellcheck source=config.sh
+source "$CAL_ROOT/config.sh"
+for _module in common consent storage collector detector session recovery daemon analyzer report; do
+    # shellcheck source=/dev/null
+    source "$CAL_ROOT/lib/${_module}.sh"
+done
+unset _module
+
+# --- Small helpers -----------------------------------------------------------
+
+main_usage() {
+    cat <<EOF
+Computer Activity Logger v${CAL_VERSION}
+
+Usage: ./main.sh <command> [options]
+
+Commands:
+  consent [--accept|--revoke]   Show the notice and record / withdraw consent
+  start                         Start the logger in the background
+  stop                          Stop it (open records are saved first)
+  daemon                        Run in the foreground (used by systemd)
+  status                        Show state, paths and data size
+  stats  [--from D] [--to D] [--top N]    Usage statistics in the terminal
+  report [--from D] [--to D] [--top N]    Excel-ready CSV report in reports/
+  purge  --all | --before YYYY-MM-DD [--yes]   Delete logged data
+  doctor                        Check the environment
+  version | help
+
+Dates (D) use the format YYYY-MM-DD.
+EOF
+}
+
+# main_die MESSAGE — print an error and exit 1.
+main_die() { echo "error: $*" >&2; exit 1; }
+
+# main_valid_date D — empty or YYYY-MM-DD.
+main_valid_date() { [[ -z $1 || $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; }
+
+# main_parse_range ARGS... — sets OPT_FROM, OPT_TO, OPT_TOP.
+main_parse_range() {
+    OPT_FROM=""; OPT_TO=""; OPT_TOP=10
+    while (( $# > 0 )); do
+        case $1 in
+            --from) OPT_FROM=${2-}; shift 2 || main_die "--from needs a value" ;;
+            --to)   OPT_TO=${2-};   shift 2 || main_die "--to needs a value" ;;
+            --top)  OPT_TOP=${2-};  shift 2 || main_die "--top needs a value" ;;
+            *) main_die "unknown option: $1" ;;
+        esac
+    done
+    main_valid_date "$OPT_FROM" || main_die "invalid --from date"
+    main_valid_date "$OPT_TO" || main_die "invalid --to date"
+    [[ $OPT_TOP =~ ^[0-9]+$ ]] || main_die "--top must be a number"
+}
+
+# main_table — pretty-print CSV from stdin as an aligned table.
+main_table() {
+    if command -v column >/dev/null 2>&1; then tr -d '"' | column -s, -t; else tr -d '"'; fi
+}
+
+# --- Commands ----------------------------------------------------------------
+
+cmd_consent() {
+    case ${1:-} in
+        --accept) consent_notice; consent_grant && echo "Consent recorded in $CONSENT_FILE" ;;
+        --revoke) consent_revoke; echo "Consent withdrawn. Logging will not start." ;;
+        "")       consent_prompt ;;
+        *)        main_die "unknown option: $1" ;;
+    esac
+}
+
+cmd_start() {
+    consent_require || exit 1
+    storage_init || main_die "cannot create directories"
+    if daemon_is_running; then echo "Already running (pid $(cat "$PID_FILE" 2>/dev/null))."; return 0; fi
+    if command -v setsid >/dev/null 2>&1; then
+        nohup setsid "$CAL_ROOT/main.sh" daemon >>"$LOG_FILE" 2>&1 </dev/null &
+    else
+        nohup "$CAL_ROOT/main.sh" daemon >>"$LOG_FILE" 2>&1 </dev/null &
+    fi
+    sleep 1
+    if daemon_is_running; then echo "Started (pid $(cat "$PID_FILE" 2>/dev/null))."; else
+        main_die "failed to start — see $LOG_FILE"; fi
+}
+
+cmd_stop() {
+    local pid i
+    if ! daemon_is_running; then echo "Not running."; return 0; fi
+    pid=$(cat "$PID_FILE" 2>/dev/null) || main_die "pid file missing"
+    kill -TERM "$pid" 2>/dev/null || main_die "cannot signal pid $pid"
+    for (( i = 0; i < 50; i++ )); do
+        if ! daemon_is_running; then echo "Stopped."; return 0; fi
+        sleep 0.2
+    done
+    main_die "daemon (pid $pid) did not stop within 10 s"
+}
+
+cmd_status() {
+    local files size
+    echo "Computer Activity Logger v${CAL_VERSION}  (user: $CAL_USER)"
+    if consent_is_granted; then echo "Consent  : granted"; else echo "Consent  : NOT granted (run ./main.sh consent)"; fi
+    if daemon_is_running; then echo "Daemon   : running (pid $(cat "$PID_FILE" 2>/dev/null))"; else echo "Daemon   : stopped"; fi
+    echo "Interval : ${INTERVAL_SEC}s   Min duration: ${MIN_DURATION_SEC}s"
+    echo "Data     : $DATA_DIR"
+    echo "Reports  : $REPORTS_DIR"
+    files=$(find "$DATA_DIR" -maxdepth 1 -name '*.csv' 2>/dev/null | wc -l)
+    size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
+    echo "Files    : ${files} CSV file(s), ${size:-0}"
+    echo "Collects : process names + start/end times + durations (no arguments, no content)"
+}
+
+cmd_stats() {
+    main_parse_range "$@"
+    echo "== Summary =="; analyzer_summary "$OPT_FROM" "$OPT_TO" | main_table
+    echo; echo "== Top applications =="; analyzer_top_apps "$OPT_FROM" "$OPT_TO" "$OPT_TOP" | main_table
+    echo; echo "== Per day =="; analyzer_daily "$OPT_FROM" "$OPT_TO" | main_table
+}
+
+cmd_report() {
+    local dir
+    main_parse_range "$@"
+    storage_init || main_die "cannot create directories"
+    dir=$(report_build "$OPT_FROM" "$OPT_TO" "$OPT_TOP") || main_die "report failed"
+    echo "Report created: $dir"
+    ls -1 "$dir"
+}
+
+cmd_purge() {
+    local mode="" before="" yes=0 f ans="" cutoff month
+    while (( $# > 0 )); do
+        case $1 in
+            --all) mode=all ;;
+            --before) mode=before; before=${2-}; shift ;;
+            --yes) yes=1 ;;
+            *) main_die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    [[ -n $mode ]] || main_die "purge needs --all or --before YYYY-MM-DD"
+    if daemon_is_running; then main_die "stop the logger first (./main.sh stop)"; fi
+    if [[ $mode == before ]]; then
+        main_valid_date "$before" && [[ -n $before ]] || main_die "invalid --before date"
+        cutoff=${before:0:7}
+        echo "Files of months earlier than $cutoff (month granularity) will be deleted."
+    else
+        echo "ALL CSV data in $DATA_DIR will be deleted."
+    fi
+    if (( yes == 0 )); then
+        read -r -p "Type 'yes' to confirm: " ans
+        [[ $ans == yes ]] || { echo "Cancelled."; return 0; }
+    fi
+    for f in "$DATA_DIR"/processes_*.csv "$DATA_DIR"/sessions_*.csv; do
+        [[ -f $f ]] || continue
+        month=${f##*_}; month=${month%.csv}
+        if [[ $mode == all || $month < $cutoff ]]; then rm -f -- "$f"; echo "deleted $f"; fi
+    done
+}
+
+cmd_doctor() {
+    local c bad=0
+    echo "Bash     : $BASH_VERSION"
+    for c in ps awk sort cut head flock column df date mktemp; do
+        if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c"; else echo "  MISSING $c"; bad=1; fi
+    done
+    for c in systemctl setsid; do
+        if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c (optional)"; else echo "  absent  $c (optional)"; fi
+    done
+    storage_init && echo "  ok      directories writable" || { echo "  FAIL    directories"; bad=1; }
+    if consent_is_granted; then echo "  ok      consent"; else echo "  todo    consent not granted"; fi
+    config_validate && echo "  ok      configuration" || bad=1
+    return "$bad"
+}
+
+# --- Dispatcher --------------------------------------------------------------
+
+main() {
+    local cmd=${1:-help}
+    if (( $# > 0 )); then shift; fi
+    common_require_bash || exit 1
+    config_validate || exit 1
+    case $cmd in
+        daemon)  CAL_VERBOSE=${CAL_VERBOSE:-0}; daemon_run ;;
+        start)   cmd_start ;;
+        stop)    cmd_stop ;;
+        status)  cmd_status ;;
+        consent) cmd_consent "$@" ;;
+        stats)   cmd_stats "$@" ;;
+        report)  cmd_report "$@" ;;
+        purge)   cmd_purge "$@" ;;
+        doctor)  cmd_doctor ;;
+        version|--version|-V) echo "$CAL_VERSION" ;;
+        help|--help|-h) main_usage ;;
+        *) echo "unknown command: $cmd" >&2; main_usage >&2; exit 1 ;;
+    esac
+}
+
+main "$@"

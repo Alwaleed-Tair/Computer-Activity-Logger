@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 **Computer Activity Logger** — a Bash-only tool that, with the user's explicit consent, runs in the background after login and logs process start/end times and durations to CSV files, then produces statistics and Excel-openable reports.
 
-**Status:** design phase. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
+**Status:** v0.1 — base skeleton implemented and smoke-tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
 
 ## Language
 
@@ -23,43 +23,46 @@ Guidance for Claude Code when working in this repository.
 
 ## Architecture (summary)
 
-Polling daemon (`lib/daemon.sh`) → `collector.sh` (`ps` snapshot) → `detector.sh` (diff) → `storage.sh` (append-only CSV + atomic state files). `analyzer.sh` / `report.sh` read CSV only. CLI entry point: `bin/cal`.
+Polling daemon (`lib/daemon.sh`) → `collector.sh` (`ps` snapshot) → `detector.sh` (diff) → `storage.sh` (append-only CSV + atomic state files). `analyzer.sh` / `report.sh` read CSV only. CLI entry point: `main.sh` (settings in `config.sh`).
 
 Key design rules:
 - Process identity = `pid + start_mono` (`/proc/uptime` − `etimes`); durations use monotonic time, never wall-clock differences.
-- CSV: append-only, UTF-8 **with BOM**, RFC 4180 quoting, `csv_safe` guards against formula injection (`= + - @`).
-- State files (`active.tsv`, `heartbeat`, `session.state`) are written via `mktemp` + `mv`; crash recovery relies on them (see DESIGN §8).
+- CSV: append-only, UTF-8 **with BOM**, RFC 4180 quoting; `csv_row` (lib/common.sh) guards against formula injection (`= + - @`).
+- State files (`active.tsv`, `heartbeat`, `session.state`) are written to `<file>.tmp` then `mv`; crash recovery relies on them (see DESIGN §8).
 - Use shell builtins in the main loop (`read`, `printf '%(%s)T'`, arrays); one `ps` call per cycle.
 
 ## Layout
 
 ```
-bin/cal            CLI dispatcher
-lib/*.sh           modules (common, config, consent, session, collector, detector,
+main.sh            CLI entry point (dispatches commands to lib/)
+config.sh          all settings (env vars / config.local.sh override)
+lib/*.sh           modules (common, consent, collector, detector, session,
                    storage, recovery, daemon, analyzer, report)
-conf/              *.example config files
-install/           install.sh, uninstall.sh, cal.service, cal.desktop
-tests/             unit/ integration/ fixtures/ run_all.sh
-docs/              DESIGN.md, PRIVACY.md, CSV_SCHEMA.md
+conf/              *.example lists (ignore.list, apps.map)
+data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
+state/             runtime state (git-ignored)
+install/           install.sh, uninstall.sh, systemd/autostart templates
+tests/             run_all.sh, smoke.sh
+docs/              DESIGN.md
 ```
 
 ## Commands
 
 ```bash
-shellcheck bin/cal lib/*.sh install/*.sh   # static analysis (must be clean)
-shfmt -d .                                 # formatting check
-bash tests/run_all.sh                      # all tests (bats-core)
-bats tests/unit                            # unit tests only
+bash tests/run_all.sh        # bash -n + shellcheck (if installed) + sandboxed smoke test
+bash tests/smoke.sh          # smoke test only
+./main.sh doctor             # environment check
 ```
 
-Integration tests must use an isolated temporary `HOME` and `INTERVAL_SEC=1`; never touch the real user's config or data.
+Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CONSENT_FILE`, `INTERVAL_SEC=1`); never touch the real data. Do not use `pkill -f` in tests (it can match the test runner itself) — kill by PID.
+
 
 ## Coding conventions
 
 - Every script: `#!/usr/bin/env bash`, `set -uo pipefail` (avoid blanket `set -e` in loops; check return codes explicitly), quote all expansions.
 - Prefix functions by module (`storage_…`) or follow the names in DESIGN §6; no global state outside documented variables.
 - Fail one cycle softly (log a warning, continue); never let the daemon die on a transient error.
-- Write tests alongside each module; fixtures of `ps` output live in `tests/fixtures/`.
+- Add a check to `tests/smoke.sh` for every bug you fix (it already guards kernel-thread filtering, BOM, recovery).
 
 ## Workflow
 

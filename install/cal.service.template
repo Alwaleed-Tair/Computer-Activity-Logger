@@ -1,0 +1,15 @@
+[Unit]
+Description=Computer Activity Logger (runs only with the user's recorded consent)
+Documentation=file://@CAL_ROOT@/README.md
+
+[Service]
+Type=simple
+ExecStart=@CAL_ROOT@/main.sh daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

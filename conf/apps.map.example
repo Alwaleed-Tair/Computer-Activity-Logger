@@ -1,0 +1,21 @@
+# comm|Friendly name|category      ('#' starts a comment)
+# Copy to conf/apps.map to customise. Unlisted processes keep their own name.
+firefox|Firefox|browser
+chrome|Google Chrome|browser
+chromium|Chromium|browser
+code|VS Code|editor
+vim|Vim|editor
+nvim|Neovim|editor
+nano|Nano|editor
+gedit|Gedit|editor
+libreoffice|LibreOffice|office
+soffice.bin|LibreOffice|office
+thunderbird|Thunderbird|office
+vlc|VLC|media
+spotify|Spotify|media
+gimp|GIMP|media
+python3|Python|dev
+node|Node.js|dev
+gcc|GCC|dev
+make|Make|dev
+git|Git|dev
