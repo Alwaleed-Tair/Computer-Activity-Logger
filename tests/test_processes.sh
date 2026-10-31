@@ -461,8 +461,13 @@ section "B9. configuration, privacy, permissions"
 for v in 0 61 abc; do expect_fail "INTERVAL_SEC=$v is rejected" env INTERVAL_SEC=$v "$MAIN" status; done
 INTERVAL_SEC=3 "$MAIN" start >/dev/null; sleep 1
 expect_ok "scan period is configurable (status shows 3s)" bash -c "INTERVAL_SEC=3 '$MAIN' status | grep -q 'Interval : 3s'"
-hb1=$(cut -d' ' -f1 "$HEARTBEAT_FILE"); sleep 3.5; hb2=$(cut -d' ' -f1 "$HEARTBEAT_FILE")
-expect_between "heartbeat advances by about one scan period" 3 4 "$(( hb2 - hb1 ))"
+# Sample the heartbeat for ~8 s: every CHANGE must be one scan period (3 s +-1) apart.
+# (Comparing two reads a fixed time apart is phase-dependent and flaky.)
+hb_vals=(); for _ in $(seq 1 17); do hb_vals+=("$(cut -d' ' -f1 "$HEARTBEAT_FILE")"); sleep 0.5; done
+mapfile -t hb_uniq < <(printf '%s\n' "${hb_vals[@]}" | awk '!seen[$0]++')
+hb_bad=0; for (( _i = 1; _i < ${#hb_uniq[@]}; _i++ )); do d=$(( hb_uniq[_i] - hb_uniq[_i-1] )); if (( d < 2 || d > 4 )); then hb_bad=1; fi; done
+expect_eq "heartbeat advances once per scan period (3 s, +-1) across ${#hb_uniq[@]} distinct values" "0" "$hb_bad"
+if (( ${#hb_uniq[@]} >= 3 )); then pass "...and it advanced at least twice in 8 s"; else fail "...and it advanced at least twice in 8 s" "${hb_uniq[*]}"; fi
 "$MAIN" stop >/dev/null
 expect_eq "no sudo anywhere in the code" "0" "$(grep -rwn 'sudo' "$ROOT/lib" "$ROOT/main.sh" "$ROOT/config.sh" | grep -v '^\S*:[0-9]*:\s*#' | grep -vc 'no sudo\|never\|without sudo\|not use sudo')"
 expect_eq "only the current user's processes are requested from ps" "1" "$(grep -c 'ps -u "\$EUID"' "$ROOT/lib/collector.sh")"
