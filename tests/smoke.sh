@@ -40,7 +40,7 @@ sleep 1 && sleep 3 &
 wait
 sleep 2
 "$MAIN" stop >/dev/null
-PFILE=$(ls "$DATA_DIR"/processes_*.csv 2>/dev/null | head -n1)
+PFILE="$DATA_DIR/processes.csv"
 SFILE="$DATA_DIR/sessions.csv"
 check "processes CSV exists" test -s "${PFILE:-/nonexistent}"
 check "CSV starts with UTF-8 BOM" bash -c "head -c3 '${PFILE:-/x}' | od -An -tx1 | grep -q 'ef bb bf'"
@@ -60,13 +60,13 @@ sleep 2
 check "session recovered as CRASHED" grep -q ',CRASHED$' "$DATA_DIR/sessions.csv"
 kill "$LONG" 2>/dev/null; sleep 2
 "$MAIN" stop >/dev/null
-check "long process logged after it ended" grep -q '"sleep"' "$DATA_DIR"/processes_*.csv
+check "long process logged after it ended" grep -q '"sleep"' "$DATA_DIR/processes.csv"
 
 echo "== analysis & report =="
 check "stats runs" "$MAIN" stats
 check "report runs" "$MAIN" report
-check "report has 5 files" bash -c "[ \$(ls '$REPORTS_DIR'/report_*/ | wc -l) -eq 5 ]"
-check "kernel threads are not logged" bash -c "! grep -qE 'kthreadd|kworker' '$DATA_DIR'/processes_*.csv"
+check "report has 7 files" bash -c "[ \$(ls '$REPORTS_DIR'/report_*/ | wc -l) -eq 7 ]"
+check "kernel threads are not logged" bash -c "! grep -qE 'kthreadd|kworker' '$DATA_DIR/processes.csv'"
 check "no command-line arguments leaked" bash -c "! grep -rq 4242 '$DATA_DIR'"
 
 echo

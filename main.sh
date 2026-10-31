@@ -42,6 +42,8 @@ Commands:
   stop                          Stop it (open records are saved first)
   daemon                        Run in the foreground (used by systemd)
   status                        Show state, paths and data size
+  processes [--running|--apps|--background|--check] [--tail N] [--class C] [--from D] [--to D]
+                                Process log: finished (default) / running now / by application
   sessions [--local|--tz ZONE] [--from D] [--to D] [--status S] [--check]
                                 Session log (UTC by default; --local = this machine's zone)
   stats  [--from D] [--to D] [--top N]    Usage statistics in the terminal
@@ -77,6 +79,9 @@ main_parse_range() {
 }
 
 # main_table — pretty-print CSV from stdin as an aligned table.
+# main_tsv — align TAB separated text from stdin.
+main_tsv() { if command -v column >/dev/null 2>&1; then column -t -s $'\t'; else cat; fi; }
+
 main_table() {
     if command -v column >/dev/null 2>&1; then tr -d '"' | column -s, -t; else tr -d '"'; fi
 }
@@ -156,6 +161,51 @@ cmd_sessions() {
     analyzer_sessions_view "$from" "$to" "$status" "$zone" | if command -v column >/dev/null 2>&1; then column -t -s $'\t'; else cat; fi
 }
 
+cmd_processes() {
+    local mode=table class="" tail=20 from="" to="" top=10
+    while (( $# > 0 )); do
+        case $1 in
+            --running)    mode=running ;;
+            --apps)       mode=apps ;;
+            --background) mode=bg ;;
+            --class)      class=${2-}; shift ;;
+            --check)      mode=check ;;
+            --tail)       tail=${2-}; shift ;;
+            --top)        top=${2-}; shift ;;
+            --from)       from=${2-}; shift ;;
+            --to)         to=${2-}; shift ;;
+            *) main_die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    main_valid_date "$from" || main_die "invalid --from date"
+    main_valid_date "$to" || main_die "invalid --to date"
+    [[ $tail =~ ^[0-9]+$ && $top =~ ^[0-9]+$ ]] || main_die "--tail/--top must be numbers"
+    case $mode in
+        check)   storage_verify_processes ;;
+        running) cmd_processes_running ;;
+        apps)    analyzer_top_apps "$from" "$to" "$top" User_Application | main_table ;;
+        bg)      analyzer_top_apps "$from" "$to" "$top" Background_Process | main_table ;;
+        *)
+            if [[ ! -s $PROCESSES_FILE ]]; then echo "No finished processes recorded yet ($PROCESSES_FILE)."; return 0; fi
+            analyzer_processes_view "$from" "$to" "$class" "$tail" | main_tsv ;;
+    esac
+}
+
+# Processes being tracked right now (from the live state file; times in UTC).
+cmd_processes_running() {
+    local rec st n=0
+    if [[ ! -s $ACTIVE_FILE ]]; then echo "Nothing is being tracked (is the logger running?)."; return 0; fi
+    {
+        printf 'PID\tProcess\tClass\tApplication\tRoot\tStart(UTC)\tBefore_Session\tSession\n'
+        while IFS= read -r rec || [[ -n $rec ]]; do
+            [[ -n $rec ]] || continue
+            record_unpack "$rec"; common_fmt_ts st "$R_START_EPOCH"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$R_PID" "$R_COMM" "$R_CLASS" "$R_APP" "$R_ROOT" "$st" "$R_PRE" "$R_SESSION"
+        done <"$ACTIVE_FILE"
+    } | main_tsv
+}
+
 cmd_stats() {
     main_parse_range "$@"
     echo "== Summary =="; analyzer_summary "$OPT_FROM" "$OPT_TO" | main_table
@@ -173,7 +223,7 @@ cmd_report() {
 }
 
 cmd_purge() {
-    local mode="" before="" yes=0 f ans="" cutoff month
+    local mode="" before="" yes=0 ans=""
     while (( $# > 0 )); do
         case $1 in
             --all) mode=all ;;
@@ -187,8 +237,7 @@ cmd_purge() {
     if daemon_is_running; then main_die "stop the logger first (./main.sh stop)"; fi
     if [[ $mode == before ]]; then
         main_valid_date "$before" && [[ -n $before ]] || main_die "invalid --before date"
-        cutoff=${before:0:7}
-        echo "Process files of months earlier than $cutoff, and session rows with Login_Date < $before, will be deleted."
+        echo "Process rows with Start_Time < $before, and session rows with Login_Date < $before, will be deleted."
     else
         echo "ALL CSV data in $DATA_DIR will be deleted."
     fi
@@ -196,11 +245,12 @@ cmd_purge() {
         read -r -p "Type 'yes' to confirm: " ans
         [[ $ans == yes ]] || { echo "Cancelled."; return 0; }
     fi
-    for f in "$DATA_DIR"/processes_*.csv; do
-        [[ -f $f ]] || continue
-        month=${f##*_}; month=${month%.csv}
-        if [[ $mode == all || $month < $cutoff ]]; then rm -f -- "$f"; echo "deleted $f"; fi
-    done
+    # processes.csv / process_details.csv: drop everything, or only the rows before the date.
+    if [[ $mode == all ]]; then
+        rm -f -- "$PROCESSES_FILE" "$PROCESS_DETAILS_FILE" && echo "deleted $PROCESSES_FILE and $PROCESS_DETAILS_FILE"
+    else
+        echo "removed $(storage_purge_before "$before") process row(s) from $PROCESSES_FILE"
+    fi
     # sessions.csv is a single file: drop everything, or only the closed rows before the date.
     if [[ $mode == all ]]; then
         rm -f -- "$SESSIONS_FILE" "$SESSIONS_FILE.bak" && echo "deleted $SESSIONS_FILE"
@@ -237,6 +287,7 @@ main() {
         stop)    cmd_stop ;;
         status)  cmd_status ;;
         consent) cmd_consent "$@" ;;
+        processes) cmd_processes "$@" ;;
         sessions) cmd_sessions "$@" ;;
         stats)   cmd_stats "$@" ;;
         report)  cmd_report "$@" ;;

@@ -7,7 +7,7 @@
 
 ثم يحوّل ذلك إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel.
 
-> الحالة: **v0.2 — Session Logger مكتمل** (جلسات في `sessions.csv` بتوقيت UTC، تحديث السجل في مكانه، استعادة بعد الانهيار، قفل ضد الكتابة المتزامنة).
+> الحالة: **v0.3 — Process Monitor مكتمل** (اكتشاف بدء/انتهاء العمليات، تمييز التطبيقات عن العمليات الخلفية، ربط بالجلسة، استعادة بعد موت المراقب) فوق Session Logger (`sessions.csv`، UTC).
 > التصميم الكامل في [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## الخصوصية (ملتزمون بها)
@@ -35,6 +35,7 @@ Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df
 ./main.sh stats          # إحصائيات في الطرفية
 ./main.sh report         # ينشئ تقريرًا في reports/report_<التاريخ>/
 ./main.sh sessions       # سجل الجلسات (UTC) — أضف --local أو --tz Asia/Riyadh للتوقيت المحلي
+./main.sh processes      # آخر العمليات المنتهية — أضف --running (الجارية الآن) أو --apps أو --background أو --check
 ./main.sh stop           # يوقف ويحفظ كل السجلات المفتوحة
 ```
 
@@ -59,8 +60,8 @@ config.sh              كل الإعدادات (قابلة للتجاوز بمت
 lib/
   common.sh            سجل، وقت، CSV آمن، نوم قابل للمقاطعة
   consent.sh           الموافقة وإشعار الخصوصية
-  collector.sh         لقطة العمليات (أمر ps واحد لكل دورة)
-  detector.sh          مقارنة اللقطات: عمليات بدأت / انتهت + التصنيف والتجاهل
+  collector.sh         لقطة العمليات: أمر ps واحد لكل فحص (PID، PPID، الاسم، المستخدم، CPU، الذاكرة) + اسم الملف التنفيذي دفعةً واحدة
+  detector.sh          الفرق بين اللقطات: بدأت/انتهت، هوية PID+وقت البدء، التصنيف (تطبيق/خلفية)، تجميع عمليات التطبيق الواحد
   session.sh           دورة حياة الجلسة (تُنشئ المعرّف وتستدعي sessionlog)
   sessionlog.sh        Session Logger: ملف sessions.csv (قفل flock، تحديث ذرّي، فحص الصيغة)
   storage.sh           كتابة CSV وملفات الحالة (ذرّية) + إعادة المحاولة عند فشل الكتابة
@@ -69,11 +70,11 @@ lib/
   analyzer.sh          الإحصائيات (awk)
   report.sh            تقارير Excel
 conf/                  ignore.list.example · apps.map.example (انسخهما بدون .example للتخصيص)
-data/                  السجلات الخام: sessions.csv · processes_YYYY-MM.csv
+data/                  السجلات الخام: sessions.csv · processes.csv · process_details.csv
 reports/               التقارير المولّدة
 state/                 حالة التشغيل (pid، heartbeat…) — تُنشأ تلقائيًا ولا تُرفع إلى git
 install/               install.sh · uninstall.sh · قوالب systemd و autostart
-tests/                 run_all.sh · test_sessions.sh (75 فحصًا) · smoke.sh
+tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (161) · smoke.sh
 docs/DESIGN.md         وثيقة التصميم الكاملة
 ```
 
@@ -86,6 +87,39 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 4. تُحدَّث `heartbeat` و`active.tsv` باستمرار؛ إن مات البرنامج فجأة تُغلق `recovery.sh`
    الجلسة والعمليات المفتوحة عند آخر heartbeat (الحالة `CRASHED` / `POWER_LOSS`).
 5. أمر `SIGTERM` (إيقاف/تسجيل خروج/إطفاء) يُغلق كل شيء بشكل نظيف (`COMPLETED`).
+
+### العمليات: `data/processes.csv` + `data/process_details.csv`
+
+**`processes.csv`** — ثمانية أعمدة بالضبط، صف لكل عملية **منتهية** (يُضاف مرة واحدة ولا يُعاد كتابته أبدًا):
+
+| العمود | المعنى |
+|---|---|
+| `Session_ID` | الجلسة التي رُصدت فيها العملية أول مرة (نفس المعرّف في `sessions.csv`) |
+| `PID` · `Process_Name` · `Username` | معرّف العملية، اسمها (comm)، ومالكها |
+| `Start_Time` | وقت بدء العملية **الحقيقي** حسب نظام التشغيل (UTC) — صحيح حتى للعمليات التي كانت تعمل قبل المراقبة |
+| `End_Time` | وقت **اكتشاف** انتهائها (UTC)، وقد يتأخر حتى فترة فحص واحدة |
+| `Duration_Seconds` | `End_Time − Start_Time` دائمًا (محسوبة من الساعة الرتيبة) |
+| `Status` | `COMPLETED` رُصدت وهي تنتهي · `SESSION_END` أُوقفت المراقبة نظيفًا وهي تعمل (قد تستمر) · `RECOVERED` ماتت المراقبة ثم وُجدت العملية منتهية عند الإعادة (النهاية = آخر heartbeat، تقدير) |
+
+**`process_details.csv`** — صف مرافق لكل صف، يُربط بالمفتاح `Session_ID + PID + Start_Time`:
+`PPID` · `Command_Name` (اسم الملف التنفيذي) · `Class` · `App_Name` · `App_Instance` · `App_Root` · `Started_Before_Session` ·
+`Detected_Start` · `Detected_End` (أوقات الاكتشاف الفعلية) · `Paused_Seconds` · `CPU_Seconds` · `Avg_CPU_Percent` · `Peak_RSS_KB` · `Last_RSS_KB` · `Category` · `Start_Epoch` · `End_Epoch`.
+
+**لا نعتمد على PID وحده:** هوية العملية = `PID + وقت البدء الرتيب` (`uptime − etimes`)، فإذا أعاد Linux استخدام PID بوقت بدء مختلف تُغلق القديمة وتُفتح جديدة.
+
+**تطبيق أم عملية خلفية؟** العملية ليست تطبيقًا بالضرورة، والتطبيق قد يكون عشرات العمليات. يُقرَّر `Class` لجذر كل شجرة بالترتيب:
+1. `conf/apps.map` (والفئة `background` تُجبره خلفيًا) ← 2. مُشغِّل رسومي `.desktop` ← 3. cgroup (`app.slice` تطبيق · `*.service` خلفية) ← 4. يملك طرفية `pts/N` ← 5. وإلا `Background_Process`.
+العملية الابنة تنضم إلى مجموعة أبيها إن كان تطبيقًا (أو يشغّل البرنامج نفسه)، فمتصفح بـ12 عملية = **تشغيل واحد** (`App_Root=yes` مرة واحدة)، ووقته في الإحصاءات = **اتحاد** فترات عملياته لا مجموعها.
+
+**موت المراقب وإعادة تشغيله** — الملفان للإضافة فقط، فلا يضيع أي سجل سابق. العمليات الجارية وقتها محفوظة في `state/active.tsv`، وعند الإعادة:
+- ما زال حيًّا (نفس PID ونفس وقت البدء) ← **يُكمَل تتبعه** بسجله الأصلي (نفس الجلسة، نفس وقت البدء الحقيقي)، ولا يُسجَّل «كأنه بدأ الآن».
+- انتهى أثناء الغياب ← صف واحد `RECOVERED`.
+- سُجِّل صفه قبل الموت لكن لم تُحفظ الحالة ← يُتخطّى (لا تكرار).
+- ما يظهر في أول فحص ولم يكن في الحالة ← «وُجد يعمل» (`Started_Before_Session=yes`) لا «بدأ».
+
+أما الإيقاف النظيف (`stop` ثم `start`) فيُغلق العمليات الجارية بحالة `SESSION_END` في الجلسة الأولى، وتظهر في الجلسة الثانية كـ«وُجدت تعمل» — صفان لجلستين مختلفتين، لا تكرار داخل الجلسة الواحدة.
+
+للفحص: `./main.sh processes --check` (يكشف التكرار وكل تلف) · `processes --running` · `processes --apps` · `processes --background`.
 
 ### الجلسات: `data/sessions.csv`
 
@@ -115,8 +149,6 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 ملف بترويسة غريبة يُنقل إلى `sessions.csv.invalid.<وقت>` ولا يُكتب فوقه؛ ولا يُحذف أي سجل سابق إلا بأمر `purge`.
 للفحص: `./main.sh sessions --check`.
 
-### أعمدة `processes_YYYY-MM.csv`
-`session_id, username, pid, ppid, app_name, process_name, category, start_time, end_time, start_epoch, end_epoch, duration_sec, duration_hms, paused_sec, active_sec, started_before_session, end_reason` — الأوقات UTC أيضًا.
 ### فتح التقارير في Excel
 افتح ملفات `reports/report_*/*.csv` مباشرة. الترميز UTF-8 مع BOM فيظهر العربي صحيحًا،
 وأعمدة `*_sec` رقمية للجمع والـ Pivot، وأعمدة `*_hms` للقراءة.
@@ -124,10 +156,17 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 
 ## حدود معروفة
 
+- **العمليات الأقصر من فترة الفحص** (تبدأ وتنتهي بين فحصين) لا يمكن رؤيتها بالاستعلام الدوري دون صلاحيات خاصة؛ تُرصد فقط إن صادفها فحص. خفّض `INTERVAL_SEC` في `config.sh` (حتى 1) لالتقاط المزيد.
+- `End_Time` وقت **الاكتشاف** (متأخر حتى فترة فحص). `Start_Time` دقته ±1 ثانية (مشتق من «الآن − etimes»).
+- القتل بـ`SIGKILL` يُسجَّل `COMPLETED` كأي انتهاء: لا يمكن لمستخدم عادي معرفة سبب انتهاء عملية ليست ابنته.
+- CPU/الذاكرة: آخر قيمة رُصدت قبل الانتهاء (CPU = ثوانٍ تراكمية، والذاكرة RSS مع الذروة).
+- **الاستهلاك المقاس** (فاصل 5 ثوانٍ، 281 عملية): ‎0.6% CPU و6 MB RAM؛ بفاصل ثانية: ‎2.7% CPU.
+- المراقبة لحساب المستخدم الحالي فقط ولا تستخدم `sudo` ولا تقرأ عمليات الآخرين.
+
 - **الدقة:** العمليات الأقصر من `INTERVAL_SEC` قد لا تُلتقط، ووقت الانتهاء هو وقت *اكتشافه* (تأخير حتى فاصل واحد).
 - العمليات التي كانت تعمل قبل بدء الجلسة تُوسم `started_before_session=yes`.
 - تقرير يومي: العملية العابرة لمنتصف الليل تُحتسب في يوم بدايتها (تقسيمها مؤجل).
-- لم تُنفَّذ بعد (انظر خطة `docs/DESIGN.md` §14): ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي.
+- لم تُنفَّذ بعد (انظر `docs/DESIGN.md` §14): ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي، تقسيم العملية العابرة لمنتصف الليل على يومين.
 
 ## الاختبار
 

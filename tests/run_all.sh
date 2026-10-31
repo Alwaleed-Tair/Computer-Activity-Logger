@@ -25,6 +25,9 @@ fi
 echo "== session logger tests =="
 bash tests/test_sessions.sh || rc=1
 
+echo "== process monitor tests =="
+bash tests/test_processes.sh || rc=1
+
 echo "== smoke test =="
 bash tests/smoke.sh || rc=1
 exit "$rc"

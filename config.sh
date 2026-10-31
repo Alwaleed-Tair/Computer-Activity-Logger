@@ -12,18 +12,21 @@
 : "${CAL_ROOT:?config.sh must be sourced from main.sh (CAL_ROOT is not set)}"
 
 # --- Identity / version ------------------------------------------------------
-CAL_VERSION="0.2.0"
+CAL_VERSION="0.3.0"
 CAL_USER="${CAL_USER:-$(whoami)}"   # current user name (whoami)
 CAL_UID="${CAL_UID:-$EUID}"                # numeric user id (UID)
 CAL_HOST="${CAL_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
 # --- Monitoring behaviour ----------------------------------------------------
-# Seconds between process snapshots (1..60). Processes shorter than this may be
-# missed: this is a documented limitation of the polling approach.
+# Seconds between process scans (1..60) — THE scan-period setting. Lower = more
+# accurate end times and fewer missed short-lived processes, but more CPU.
+# Processes that start AND end between two scans may be missed: this is a
+# documented limitation of the polling approach.
 INTERVAL_SEC="${INTERVAL_SEC:-5}"
 
-# Processes that lived less than this many seconds are not written to the CSV.
-MIN_DURATION_SEC="${MIN_DURATION_SEC:-2}"
+# Processes observed for less than this many seconds are not written (0 = write
+# every process that was caught, however short-lived).
+MIN_DURATION_SEC="${MIN_DURATION_SEC:-0}"
 
 # --- Paths -------------------------------------------------------------------
 DATA_DIR="${DATA_DIR:-$CAL_ROOT/data}"           # raw CSV logs
@@ -55,6 +58,20 @@ LOG_MAX_BYTES="${LOG_MAX_BYTES:-1048576}"
 # Concurrent writers are serialised with flock on SESSIONS_LOCK.
 SESSIONS_FILE="${SESSIONS_FILE:-$DATA_DIR/sessions.csv}"
 SESSIONS_LOCK="${SESSIONS_LOCK:-$DATA_DIR/.sessions.lock}"
+
+# --- Process log -------------------------------------------------------------
+# processes.csv         : exactly 8 columns, one row per finished process
+#                         (Session_ID,PID,Process_Name,Username,Start_Time,End_Time,
+#                         Duration_Seconds,Status). Append-only: never rewritten, so a
+#                         monitor crash cannot lose earlier rows.
+# process_details.csv   : companion file with the rest (PPID, command name, class,
+#                         application group, CPU, memory...), joined by
+#                         Session_ID + PID + Start_Time.
+PROCESSES_FILE="${PROCESSES_FILE:-$DATA_DIR/processes.csv}"
+PROCESS_DETAILS_FILE="${PROCESS_DETAILS_FILE:-$DATA_DIR/process_details.csv}"
+
+# .desktop directories used to recognise graphical applications (read-only).
+DESKTOP_DIRS="${DESKTOP_DIRS:-/usr/share/applications:/usr/local/share/applications:$HOME/.local/share/applications}"
 
 # --- Safety ------------------------------------------------------------------
 MIN_FREE_MB="${MIN_FREE_MB:-50}"         # warn when free disk space drops below

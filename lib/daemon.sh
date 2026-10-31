@@ -58,16 +58,18 @@ daemon_on_usr1() {
 
 # --- One cycle ---------------------------------------------------------------
 
-# daemon_flush_ended UPTIME EPOCH REASON — write rows for everything in ENDED.
+# daemon_flush_ended UPTIME EPOCH STATUS — write rows for everything in ENDED.
+# Duration comes from the monotonic clock (start_mono), so it is immune to
+# clock changes; End_Time is the detection time.
 daemon_flush_ended() {
-    local up=$1 now=$2 reason=$3 rec dur
+    local up=$1 now=$2 status=$3 entry dur
     if (( ${#ENDED[@]} == 0 )); then return 0; fi
-    for rec in "${ENDED[@]}"; do
-        record_unpack "$rec"
+    for entry in "${ENDED[@]}"; do
+        ended_unpack "$entry"
         dur=$(( up - R_START_MONO ))
         if (( dur < 0 )); then dur=0; fi
         if (( dur < MIN_DURATION_SEC )); then continue; fi
-        if storage_append_process "$rec" "$now" "$dur" "$reason"; then :; fi
+        if storage_append_process "$entry" "$now" "$dur" "$status"; then :; fi
         SESSION_PROC_COUNT=$(( SESSION_PROC_COUNT + 1 ))
     done
     ENDED=()
@@ -97,7 +99,7 @@ daemon_cycle() {
     DAEMON_LAST_UP=$up
 
     detector_diff
-    daemon_flush_ended "$up" "$now" exited
+    daemon_flush_ended "$up" "$now" COMPLETED
     if (( ${#STARTED[@]} > 0 )) || (( ${#ENDED[@]} > 0 )) || [[ ! -f $ACTIVE_FILE ]]; then
         storage_save_active || log_warn "cannot save $ACTIVE_FILE"
     fi
@@ -124,7 +126,7 @@ daemon_finalize() {
     common_now_epoch now
     if (( SESSION_OPEN == 1 )); then
         detector_close_all
-        daemon_flush_ended "$up" "$now" session_end
+        daemon_flush_ended "$up" "$now" SESSION_END
         session_end "$DAEMON_EXIT_REASON" "$up" "$now"
         storage_flush_pending
         storage_clear_state
@@ -133,12 +135,22 @@ daemon_finalize() {
     return 0
 }
 
+# daemon_publish_state — write active.tsv + heartbeat right now (not only after the
+# first cycle), so a death immediately after start-up still leaves a consistent state.
+daemon_publish_state() {
+    local up now
+    common_uptime up; common_now_epoch now
+    storage_save_active || log_warn "cannot save $ACTIVE_FILE"
+    storage_write_heartbeat "$now" "$up" "$SESSION_BOOT" "$SESSION_ID" "$SESSION_PROC_COUNT" "$SESSION_PAUSED_TOTAL" || log_warn "cannot write heartbeat"
+}
+
 # --- Entry point -------------------------------------------------------------
 
 daemon_run() {
     local tries=0
     consent_require || return 1
     storage_init || { log_err "cannot create data/state directories"; return 1; }
+    storage_prepare_all || { log_err "cannot prepare the CSV files in $DATA_DIR"; return 1; }
     if ! daemon_acquire_lock; then
         log_info "another instance is already running — exiting"
         return 0
@@ -151,6 +163,7 @@ daemon_run() {
 
     common_sleep_init
     detector_load_lists
+    detector_load_desktop
     common_rotate_log
 
     # Recovery needs a first snapshot (to know which old processes survive).
@@ -161,6 +174,7 @@ daemon_run() {
     done
     recovery_run
     session_begin || return 1
+    daemon_publish_state
     common_uptime DAEMON_LAST_UP
 
     local t0 t1 delay

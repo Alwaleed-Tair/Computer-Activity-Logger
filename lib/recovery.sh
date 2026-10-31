@@ -3,21 +3,32 @@
 # lib/recovery.sh — Repair after a crash, kill -9 or power loss
 # -----------------------------------------------------------------------------
 # A leftover $SESSION_FILE means the previous daemon never closed its session.
-# We use the last heartbeat as the best estimate of "when it died":
-#   * boot id changed  -> reboot / power loss  => Status POWER_LOSS
-#   * boot id same     -> the daemon itself died => Status CRASHED
+# The last heartbeat is our best estimate of "when it died":
+#   * boot id changed  -> reboot / power loss  => session Status POWER_LOSS
+#   * boot id same     -> the daemon itself died => session Status CRASHED
 # The ACTIVE row in sessions.csv is UPDATED (end time = heartbeat), not
-# duplicated. Any other ACTIVE row we cannot explain (state file lost) is
-# marked INTERRUPTED with an empty end time.
-# Tracked processes (active.tsv) are either:
-#   * still alive (same boot, same start time) -> carried into the new session
-#   * gone                                      -> closed at the heartbeat time
-# Must run AFTER collector_snapshot (needs CUR) and BEFORE session_begin.
+# duplicated. Any other ACTIVE row we cannot explain is marked INTERRUPTED.
+#
+# Processes that were being tracked (active.tsv) are NOT treated as new:
+#   * still alive (same boot, same PID *and* start time)
+#         -> tracking CONTINUES with the original record: same Session_ID, same
+#            true Start_Time, same "pre-session" flag. No row is written yet;
+#            exactly one row will be written when it finally ends.
+#   * gone (or PID now belongs to another process, or the machine rebooted)
+#         -> one row, Status RECOVERED, End_Time = last heartbeat.
+#   * already in processes.csv (the old daemon died between "row written" and
+#     "state saved") -> skipped, so a restart can never duplicate a row.
+# Anything that merely shows up in the first scan afterwards and is not in
+# active.tsv is "found running", never "just started" (pre-session flag).
+#
+# Must run AFTER collector_snapshot (needs CUR_*) and BEFORE session_begin.
 # =============================================================================
 
 recovery_run() {
     local hb_epoch hb_up hb_boot hb_session hb_count hb_paused
-    local same_boot=0 reason status rec dur c_start now_boot kept=0 closed=0
+    local same_boot=0 reason status rec dur key start_s now_boot kept=0 closed=0 dup=0
+    local -a recs=()
+    local -A sids=()
 
     if [[ ! -f $SESSION_FILE ]]; then
         storage_clear_state          # stray files without a session: discard
@@ -46,27 +57,33 @@ recovery_run() {
 
     # 1) Tracked processes.
     if [[ -r $ACTIVE_FILE ]]; then
-        while IFS= read -r rec || [[ -n $rec ]]; do
+        mapfile -t recs <"$ACTIVE_FILE"
+        for rec in "${recs[@]}"; do          # which sessions do they belong to?
+            if [[ -z $rec ]]; then continue; fi
+            record_unpack "$rec"; sids[$R_SESSION]=1
+        done
+        storage_load_written_keys "${!sids[@]}"
+        for rec in "${recs[@]}"; do
             if [[ -z $rec ]]; then continue; fi
             record_unpack "$rec"
-            if (( same_boot == 1 )) && [[ -n ${CUR[$R_PID]+x} ]]; then
-                IFS=$'\t' read -r _ _ c_start _ <<<"${CUR[$R_PID]}"
-                if detector_same_process "$R_START_MONO" "$c_start"; then
-                    R_PRE=yes                       # it predates the new session
-                    record_pack
-                    ACTIVE[$R_PID]=$REPLY
-                    kept=$(( kept + 1 ))
-                    continue
-                fi
+            common_fmt_ts start_s "$R_START_EPOCH"
+            key="$R_SESSION|$R_PID|$start_s"
+            if [[ -n ${WRITTEN_KEYS[$key]+x} ]]; then
+                dup=$(( dup + 1 )); continue                # already written before the crash
             fi
-            dur=$(( hb_epoch - R_START_EPOCH ))     # wall clock: works across reboots
+            if (( same_boot == 1 )) && [[ -n ${CUR_START[$R_PID]+x} ]] \
+                && detector_same_process "$R_START_MONO" "${CUR_START[$R_PID]}"; then
+                detector_track_record "$rec"                # still alive: keep tracking, no new row
+                kept=$(( kept + 1 ))
+                continue
+            fi
+            dur=$(( hb_epoch - R_START_EPOCH ))             # wall clock: works across reboots
             if (( dur < 0 )); then dur=0; fi
             if (( dur >= MIN_DURATION_SEC )); then
-                SESSION_ID=$RS_ID                   # attribute the row to the old session
-                storage_append_process "$rec" "$hb_epoch" "$dur" recovered
+                storage_append_process "0"$'\t'"0"$'\t'"0"$'\t'"$rec" "$hb_epoch" "$dur" RECOVERED
                 closed=$(( closed + 1 ))
             fi
-        done <"$ACTIVE_FILE"
+        done
     fi
 
     # 2) The interrupted session: update its ACTIVE row in sessions.csv.
@@ -76,9 +93,13 @@ recovery_run() {
         "${RS_USER:-$CAL_USER}" "${RS_UID:-$CAL_UID}" \
         || log_err "could not update interrupted session $RS_ID"
 
-    storage_clear_state
+    # Persist the re-attached processes IMMEDIATELY (atomic replace). session.state is
+    # not deleted: session_begin() replaces it atomically, so at no moment is there a
+    # live process table without a session file describing it.
+    rm -f -- "$HEARTBEAT_FILE" "$HEARTBEAT_FILE.tmp"
+    storage_save_active || log_err "cannot save $ACTIVE_FILE after recovery"
     # 3) Anything else still ACTIVE has no owner.
     sessionlog_reap_orphans ""
-    log_info "recovery done: $closed process rows closed, $kept still running"
+    log_info "recovery done: $closed finished (RECOVERED), $kept still running and re-attached, $dup already recorded"
     return 0
 }

@@ -42,7 +42,7 @@ conf/              *.example lists (ignore.list, apps.map)
 data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
 state/             runtime state (git-ignored)
 install/           install.sh, uninstall.sh, systemd/autostart templates
-tests/             run_all.sh, test_sessions.sh (session logger), smoke.sh (end-to-end)
+tests/             run_all.sh, test_sessions.sh, test_processes.sh, smoke.sh (end-to-end)
 docs/              DESIGN.md
 ```
 
@@ -51,6 +51,7 @@ docs/              DESIGN.md
 ```bash
 bash tests/run_all.sh        # bash -n + shellcheck (if installed) + sandboxed smoke test
 bash tests/test_sessions.sh   # session logger tests (75 checks)
+bash tests/test_processes.sh  # process monitor tests (161 checks)
 bash tests/smoke.sh          # smoke test only
 ./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
@@ -78,3 +79,11 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - **All stored times are UTC.** Use `common_utc_date_time` / `common_utc_to_epoch` (pure Bash). Never format stored times with `printf '%(…)T'` (depends on an exported `TZ`) or localtime.
 - Every write to `sessions.csv` goes through `lib/sessionlog.sh` (flock + temp file + atomic `mv`). Never `>>`/`sed -i` it from elsewhere. Rows are never deleted except by `purge`.
 - Helpers that write to a caller-supplied variable via `printf -v "$1"` must name their own locals with a `__` prefix (dynamic scoping would otherwise capture the write).
+
+## Process log rules (processes.csv)
+
+- `processes.csv` has exactly: `Session_ID,PID,Process_Name,Username,Start_Time,End_Time,Duration_Seconds,Status`. Everything else goes in `process_details.csv` (joined by Session_ID+PID+Start_Time). Both are append-only; never rewrite them while the daemon runs.
+- **Never identify a process by PID alone** — always PID + `start_mono` (`detector_same_process`).
+- Only `ps -u $EUID`; no `sudo`; never read `cmdline`/`environ`. Process names are untrusted text: no `eval`, always quote, and keep them out of arithmetic contexts.
+- Anything found in the first scan after a (re)start is "found running" (`pre=yes`), never "started". Recovery re-attaches survivors with their ORIGINAL record; do not create a new record for them.
+- Tests that write config files must create them BEFORE sourcing `config.sh` and must assert the paths are inside the sandbox (config falls back to `conf/*.example`, which would otherwise be overwritten).
