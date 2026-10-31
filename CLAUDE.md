@@ -55,6 +55,7 @@ bash tests/test_processes.sh  # process monitor tests (175 checks)
 bash tests/test_activity.sh   # activity analyzer tests (127 checks, known-answer dataset)
 bash tests/test_reports.sh    # report generator tests (213 checks; opens files in LibreOffice if installed)
 bash tests/test_service.sh    # automatic startup tests (168 checks; real systemd user manager, skipped if none can be had)
+bash tests/e2e_plan.sh        # 20-case end-to-end plan with real test apps (writes results to stdout/$1; see TEST_REPORT.md)
 bash tests/smoke.sh          # smoke test only
 ./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
