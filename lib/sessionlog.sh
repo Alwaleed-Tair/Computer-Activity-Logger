@@ -79,6 +79,7 @@ _sessionlog_prepare() {
     common_ensure_dir "${SESSIONS_FILE%/*}" || return 1
     if [[ -s $SESSIONS_FILE ]]; then
         if sessionlog_header_ok "$SESSIONS_FILE"; then
+            chmod 600 -- "$SESSIONS_FILE" 2>/dev/null || true
             if [[ -n $(tail -c1 -- "$SESSIONS_FILE" 2>/dev/null) ]]; then
                 log_warn "$SESSIONS_FILE did not end with a newline (torn write?) — repaired"
                 printf '\n' >>"$SESSIONS_FILE" || return 1

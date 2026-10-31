@@ -35,7 +35,9 @@ echo "== normal run =="
 check "daemon is running" "$MAIN" status
 sleep 2
 cp /bin/sleep "$SANDBOX/My App"        # a name with a space
+cp /bin/sleep "$SANDBOX/برنامج"       # a non-ASCII (Arabic) name
 "$SANDBOX/My App" 3 &
+"$SANDBOX/برنامج" 3 &
 sleep 1 && sleep 3 &
 wait
 sleep 2
@@ -45,6 +47,7 @@ SFILE="$DATA_DIR/sessions.csv"
 check "processes CSV exists" test -s "${PFILE:-/nonexistent}"
 check "CSV starts with UTF-8 BOM" bash -c "head -c3 '${PFILE:-/x}' | od -An -tx1 | grep -q 'ef bb bf'"
 check "process with a space in its name was logged" grep -q 'My App' "${PFILE:-/x}"
+check "non-ASCII process name logged verbatim (not ???)" grep -q '"برنامج"' "${PFILE:-/x}"
 check "session row closed as COMPLETED" grep -q ',COMPLETED$' "${SFILE:-/x}"
 check "state files removed after clean stop" test ! -e "$STATE_DIR/session.state"
 

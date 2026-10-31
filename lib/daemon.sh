@@ -25,7 +25,8 @@ DAEMON_LOCK_FD=""
 daemon_acquire_lock() {
     exec {DAEMON_LOCK_FD}>"$LOCK_FILE" || return 1
     flock -n "$DAEMON_LOCK_FD" || return 2
-    printf '%s\n' "$$" >"$PID_FILE"
+    # tmp + rename: `stop`/`status` never read a half-written (empty) pid file.
+    printf '%s\n' "$$" >"$PID_FILE.tmp" && mv -f -- "$PID_FILE.tmp" "$PID_FILE"
 }
 
 # --- systemd notification (Type=notify) -----------------------------------------
@@ -40,9 +41,20 @@ daemon_notify_init() {
 }
 daemon_notify() { if [[ -n $_NOTIFY_BIN ]]; then "$_NOTIFY_BIN" "$@" >/dev/null 2>&1 || true; fi; return 0; }
 # Watchdog heartbeat — only when systemd asked for it (WATCHDOG_USEC set for THIS process).
+# systemd only needs a ping well inside WatchdogSec, so ping every WatchdogSec/4 (not every
+# scan): one fork of systemd-notify per ~8 s instead of one per second. A hung loop is still
+# caught after at most WatchdogSec.
+DAEMON_LAST_PING=0
 daemon_watchdog_ping() {
-    if [[ -n ${WATCHDOG_USEC:-} && ( -z ${WATCHDOG_PID:-} || ${WATCHDOG_PID:-} == "$$" ) ]]; then
-        daemon_notify WATCHDOG=1
+    local up every
+    if [[ -n ${WATCHDOG_USEC:-} && ( -z ${WATCHDOG_PID:-} || ${WATCHDOG_PID:-} == "$$" ) && ${WATCHDOG_USEC} =~ ^[0-9]+$ ]]; then
+        every=$(( WATCHDOG_USEC / 4000000 ))
+        if (( every < 1 )); then every=1; fi
+        common_uptime up
+        if (( up - DAEMON_LAST_PING >= every )); then
+            daemon_notify WATCHDOG=1
+            DAEMON_LAST_PING=$up
+        fi
     fi
     return 0
 }
@@ -67,7 +79,8 @@ daemon_is_running() {
 # TERM/INT/HUP: ask the loop to stop; decide whether this is a system shutdown.
 daemon_on_stop() {
     DAEMON_STOP=1
-    if [[ $(systemctl is-system-running 2>/dev/null) == stopping ]]; then
+    # `timeout`: a wedged D-Bus must never delay the stop (systemd would SIGKILL us after TimeoutStopSec).
+    if [[ $(timeout 2 systemctl is-system-running 2>/dev/null) == stopping ]]; then
         DAEMON_EXIT_REASON=shutdown
     else
         DAEMON_EXIT_REASON=logout
@@ -149,6 +162,9 @@ daemon_finalize() {
     common_uptime up
     common_now_epoch now
     if (( SESSION_OPEN == 1 )); then
+        # Rows for processes that ended in a cycle which was cut short (error exit) are still
+        # in ENDED and no longer in ACTIVE: write them before close_all clears ENDED.
+        daemon_flush_ended "$up" "$now" COMPLETED
         detector_close_all
         daemon_flush_ended "$up" "$now" SESSION_END
         session_end "$DAEMON_EXIT_REASON" "$up" "$now"

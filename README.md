@@ -1,46 +1,141 @@
 # Computer Activity Logger
 
-برنامج **Bash** يعمل في الخلفية على Linux، وبموافقة صريحة من المستخدم، ويسجّل:
+> الإصدار **0.6.1** · لغة التنفيذ: **Bash فقط** · الاختبارات والنتائج الفعلية: [`TEST_REPORT.md`](TEST_REPORT.md) · الشرح الأكاديمي: [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md) · الملخص النهائي والقيود: [`FINAL_SUMMARY.md`](FINAL_SUMMARY.md) · سجل التعديلات: [`CHANGELOG.md`](CHANGELOG.md) · التصميم التفصيلي: [`docs/DESIGN.md`](docs/DESIGN.md)
 
-- اسم المستخدم ووقت بداية ونهاية كل **جلسة استخدام**.
-- كل **عملية** تبدأ أو تنتهي (اسمها فقط)، مع وقت البدء والانتهاء والمدة.
+## 1. نظرة عامة (Project Overview)
 
-ثم يحوّل ذلك إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel.
+**Computer Activity Logger** برنامج يعمل في الخلفية على Linux، وبموافقة صريحة مسجَّلة من المستخدم، يسجّل:
 
-> الحالة: **v0.6 — التشغيل التلقائي (خدمة systemd للمستخدم) مكتمل** فوق Report Generator (تقارير Session / Application Activity / Usage Summary يومية وبفترة، بكتابة ذرّية وحماية للتاريخ) فوق Activity Analyzer وProcess Monitor وSession Logger.
-> التصميم الكامل في [`docs/DESIGN.md`](docs/DESIGN.md).
+- **جلسات الاستخدام**: اسم المستخدم، وقت البدء والانتهاء والمدة (`data/sessions.csv`).
+- **العمليات (Processes)**: اسم كل عملية بدأت وانتهت أثناء المراقبة، وقت البدء والانتهاء والمدة (`data/processes.csv` + `data/process_details.csv`).
 
-## الخصوصية (ملتزمون بها)
+ثم يحوّلها إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel. يمكن تشغيله يدويًا أو **تلقائيًا عند تسجيل دخول المستخدم** بخدمة systemd على مستوى المستخدم، وبصلاحيات المستخدم العادي (**بلا root**).
+
+### الخصوصية (التزام لا استثناء فيه)
 
 | يُسجَّل | لا يُسجَّل أبدًا |
 |---|---|
 | اسم العملية، وقت البدء/الانتهاء، المدة | ضغطات المفاتيح، كلمات المرور، الحافظة |
-| اسم المستخدم الحالي فقط | وسائط سطر الأوامر (قد تحوي أسرارًا) |
+| اسم المستخدم الحالي فقط | وسائط سطر الأوامر (قد تحوي أسرارًا)، `/proc/*/environ` |
 | بداية/نهاية الجلسة | عناوين النوافذ، محتوى الشاشة أو الملفات |
 | | أي شيء عن مستخدمين آخرين، أو أي اتصال بالشبكة |
 
-لا يعمل البرنامج قبل موافقتك الصريحة، ويمكنك في أي وقت: `status` · `stop` · `consent --revoke` · `purge --all`.
+لا يعمل البرنامج قبل موافقتك الصريحة (`./main.sh consent`)، ويمكنك في أي وقت: `status` · `stop` · `consent --revoke` · `purge --all`. لا شيء مخفي: الخدمة ظاهرة في `systemctl --user list-units`.
 
-## المتطلبات
+## 2. أهداف المشروع (Project Objectives)
 
-Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df date`
-(اختياريًا: `column` لتنسيق الجداول، `systemctl` و`systemd-notify` للتشغيل التلقائي). للتحقق: `./main.sh doctor`
+1. تسجيل بداية ونهاية **جلسات الاستخدام** بدقة، مع تمييز الإنهاء الطبيعي من الانهيار وانقطاع الكهرباء.
+2. اكتشاف **بدء وانتهاء كل عملية** وحساب مدتها بساعة أحادية لا تتأثر بتغيير وقت النظام، ودون الخلط بين عمليتين تشاركتا رقم PID.
+3. **عدم فقدان السجلات** عند إعادة تشغيل المراقب أو قتله أو انقطاع الكهرباء، وعدم تكرارها.
+4. حساب **إحصائيات** صحيحة (التطبيقات الأكثر استخدامًا، إجمالي المدة، المتوسطات، الاستخدام اليومي) دون خلط وقت الاستخدام بمجموع مدد العمليات المتزامنة.
+5. إنتاج **تقارير CSV** متوافقة مع Excel وآمنة الكتابة، مع حفظ التاريخ وعدم استبداله دون داعٍ.
+6. **التشغيل التلقائي** عند تسجيل الدخول مع إعادة تشغيل عند الفشل وإيقاف آمن ونسخة واحدة فقط.
+7. الالتزام الصارم بـ **Bash** وأدوات Linux القياسية، وبالخصوصية والموافقة.
 
-## التشغيل السريع
+## 3. التقنيات المستخدمة (Technologies Used)
+
+| البند | الاستخدام |
+|---|---|
+| **Bash ≥ 4.3** | كل منطق المشروع (مصفوفات ترابطية، `printf -v`، `trap`، `flock` عبر واصفات مسمّاة) |
+| أدوات Linux القياسية | `ps` (procps) · `awk` · `sort` · `uniq` · `cut` · `tr` · `head` · `tail` · `grep` · `sed` · `find` · `stat` · `flock` (util-linux) · `df` · `du` · `mktemp` · `sha256sum` · `date` |
+| `/proc` | `/proc/uptime` (الساعة الأحادية) · `/proc/<pid>/exe` و`cgroup` (التصنيف، أسماء فقط) · `/proc/stat` (وقت الإقلاع) |
+| **systemd (اختياري)** ≥ 240 | خدمة المستخدم للتشغيل عند الدخول (`Type=notify`، watchdog، سياسة إعادة التشغيل) |
+| CSV (UTF-8 + BOM, RFC 4180) | التخزين والتقارير |
+| لا شيء آخر | **لا** Python ولا Java ولا C# ولا واجهة رسومية ولا اتصال شبكي |
+
+## 4. التثبيت (Installation Instructions)
+
+**المتطلبات:** Linux (جُرِّب على Ubuntu 24.04)، Bash ≥ 4.3، الأدوات أعلاه (كلها موجودة افتراضيًا في Ubuntu)، وsystemd ≥ 240 إن أردت التشغيل التلقائي.
 
 ```bash
-./main.sh consent        # اقرأ الإشعار واكتب yes للموافقة
-./main.sh start          # يبدأ في الخلفية
-./main.sh status         # الحالة والمسارات وحجم البيانات
-./main.sh stats          # تقرير النشاط الكامل في الطرفية (أضف --utc-offset +03:00 لحدود اليوم المحلية)
-./main.sh report         # تقرير الفترة كاملة → reports/period/UTC/all/   (راجع «مولّد التقارير»)
-./main.sh sessions       # سجل الجلسات (UTC) — أضف --local أو --tz Asia/Riyadh للتوقيت المحلي
-./main.sh processes      # آخر العمليات المنتهية — أضف --running (الجارية الآن) أو --apps أو --background أو --check
-./main.sh stop           # يوقف ويحفظ كل السجلات المفتوحة (إن لم يستجب خلال STOP_TIMEOUT_SEC يُفرض إيقافه ويُغلق التعافي جلسته عند التشغيل التالي)
+git clone https://github.com/Alwaleed-Tair/Computer-Activity-Logger.git
+cd Computer-Activity-Logger
+./main.sh doctor        # فحص البيئة: يجب ألا يظهر "missing"
 ```
 
-خيارات مفيدة: `stats --from 2026-10-01 --to 2026-10-31 --top 5` ·
-`INTERVAL_SEC=2 ./main.sh start` · `./main.sh purge --before 2026-01-01`.
+لا يحتاج البرنامج إلى بناء أو تثبيت حزم. لا تستخدم `sudo`: كل شيء يعمل بصلاحياتك وفي مجلد المشروع (`data/` و`state/` و`reports/`).
+
+**الموافقة (إلزامية قبل أي تسجيل):**
+
+```bash
+./main.sh consent       # يعرض ما يُجمع وما لا يُجمع؛ اكتب yes للموافقة
+```
+
+**اختياري — التشغيل التلقائي عند تسجيل الدخول (موافقة + تثبيت الخدمة + تفعيلها + تشغيلها):**
+
+```bash
+install/install.sh                      # أضف --accept لتخطي سؤال الموافقة، و--with-daily-reports لمؤقّت التقارير اليومية
+```
+
+أو خطوة بخطوة (انظر «التشغيل التلقائي» أدناه): `./main.sh service install` ثم `service enable` ثم `service start`. بدون systemd يُنشئ المثبّت ملف XDG autostart بدلًا منها.
+
+## 5. طريقة التشغيل (How to Run)
+
+```bash
+./main.sh start          # يبدأ المراقب في الخلفية (يلزم consent أولًا)
+./main.sh status         # الحالة والمسارات وحجم البيانات
+./main.sh processes --running      # ما يتتبعه الآن
+./main.sh processes      # آخر العمليات المنتهية (أضف --apps أو --background أو --check)
+./main.sh sessions       # سجل الجلسات (UTC) — أضف --local أو --tz Asia/Riyadh للتوقيت المحلي
+./main.sh stats          # التقرير الإحصائي في الطرفية (--from/--to/--top/--utc-offset +03:00)
+./main.sh report         # تقرير الفترة كاملة → reports/period/UTC/all/
+./main.sh report daily   # تقرير لكل يوم → reports/daily/UTC/YYYY-MM-DD/
+./main.sh report verify  # فحص التقارير (مانيفست + قواعد Excel)
+```
+
+الفاصل بين الفحوص `INTERVAL_SEC` (افتراضيًا 5 ثوانٍ، من 1 إلى 60): `INTERVAL_SEC=1 ./main.sh start` مؤقتًا، أو دائمًا في ملف `config.local.sh` (صلاحية 600). مع التشغيل التلقائي تُوضع الإعدادات في `config.local.sh` لأن الخدمة لا ترث متغيرات الصدفة.
+
+## 6. طريقة الإيقاف (How to Stop)
+
+```bash
+./main.sh stop           # إيقاف آمن: يُغلق الجلسة ويحفظ كل العمليات المفتوحة (SESSION_END) ثم يخرج
+./main.sh service stop   # للخدمة التلقائية (نفس الإيقاف الآمن)
+./main.sh consent --revoke   # سحب الموافقة: لن يبدأ التسجيل بعدها
+install/uninstall.sh     # إزالة التشغيل التلقائي (تبقى البيانات)
+./main.sh purge --all    # (اختياري) حذف البيانات نفسها — يرفض العمل والمراقب يعمل
+```
+
+إن لم يستجب المراقب خلال `STOP_TIMEOUT_SEC` (افتراضيًا 10 ثوانٍ) يُفرض إيقافه، ويُغلق التعافي جلسته عند التشغيل التالي (`CRASHED`) دون ضياع بيانات.
+
+## 7. ملفات المخرجات (Output Files)
+
+| المسار | المحتوى |
+|---|---|
+| `data/sessions.csv` | جلسة لكل صف (9 أعمدة، UTC) · الحالات: `ACTIVE COMPLETED CRASHED POWER_LOSS INTERRUPTED ABORTED` |
+| `data/processes.csv` | عملية منتهية لكل صف (8 أعمدة) · الحالات: `COMPLETED SESSION_END RECOVERED` |
+| `data/process_details.csv` | تفاصيل مرافقة (20 عمودًا: PPID، الصنف، التطبيق، CPU، الذاكرة…) |
+| `reports/daily/UTC/<يوم>/` و`reports/period/UTC/<اسم>/` | `session_report.csv` · `application_activity_report.csv` · `usage_summary_report.csv` · `report_manifest.csv` |
+| `reports/report_log.csv` | سجل تدقيق (GENERATED / REPLACED) |
+| `state/cal.log` | سجل البرنامج التشخيصي |
+| `state/service-error.log` | أخطاء الخدمة فقط (يُدوَّر) |
+| `state/` (باقي الملفات) | حالة التشغيل: `daemon.lock/pid` · `session.state` · `heartbeat` · `active.tsv` |
+
+كل الملفات `600` والمجلدات `700`. ملفات CSV بترميز UTF-8 مع BOM (يظهر العربي صحيحًا في Excel) ولا تُرفع `data/` و`reports/` و`state/` إلى git. شرح الأعمدة في الأقسام التفصيلية أدناه.
+
+## 8. حل المشكلات (Troubleshooting)
+
+| العَرَض | السبب والحل |
+|---|---|
+| `start` يرفض: *No consent* | شغّل `./main.sh consent` أولًا. (الخدمة تخرج بالرمز 4 ولا تُعاد) |
+| `Already running` / الخدمة تخرج بالرمز 3 | نسخة أخرى تعمل (قفل `state/daemon.lock`). أوقفها بـ`./main.sh stop` أو `service stop`. لا يمكن تشغيل نسختين معًا |
+| `failed to start — see state/cal.log` | اقرأ `state/cal.log`؛ وجرّب `./main.sh doctor` للتأكد من وجود الأدوات وصلاحية الإعدادات |
+| `service …` تقول: *no systemd user manager is reachable* | مدير systemd للمستخدم يوجد داخل جلسة دخول. من `su` أو cron أو حاوية جرّب `export XDG_RUNTIME_DIR=/run/user/$(id -u)`؛ وإلا استخدم `./main.sh start` اليدوي |
+| الخدمة بحالة `failed` بعد إخفاقات متكررة | حدّ البدء (5 مرات/5 دقائق). اقرأ `./main.sh service logs` ثم `./main.sh service start` (يمسح الحالة الفاشلة) |
+| `config: ignoring …/config.local.sh` | الملف يُحمَّل كشيفرة فيُرفض إن لم تكن مالكه أو كان قابلًا للكتابة لغيرك: `chmod 600 config.local.sh` |
+| `config: INTERVAL_SEC must be…` | القيمة خارج 1–60 أو ليست عددًا |
+| عملية لا تظهر في السجل | عمرها أقل من `MIN_DURATION_SEC` أو من فاصل الفحص (حد معروف)، أو اسمها في `conf/ignore.list`. خفّض `INTERVAL_SEC` |
+| الاسم العربي يظهر `?` في آخره | النواة تقتطع اسم العملية عند 15 بايتًا؛ الاسم الكامل في `process_details.csv` (`Command_Name`) |
+| الأعمدة كلها في خلية واحدة في Excel | إعدادات إقليمية تستخدم `;` — استخدم *Data ▸ From Text/CSV* واختر الفاصل `,` |
+| `purge` يقول *stop the logger first* | أوقف المراقب (والخدمة) أولًا |
+| بعد انهيار/انقطاع كهرباء | لا إجراء: عند التشغيل التالي يغلق التعافي الجلسة (`CRASHED`/`POWER_LOSS`) والعمليات (`RECOVERED`) |
+| ملف CSV تالف أو ترويسة غريبة | يُنقل إلى `*.invalid.<وقت>` ولا يُكتب فوقه؛ افحص بـ`sessions --check` و`processes --check` و`report verify` |
+| مساحة القرص قليلة | تحذير في `state/cal.log` (`MIN_FREE_MB`)؛ استخدم `purge --before YYYY-MM-DD` |
+
+للتشخيص الأعمق: `CAL_VERBOSE=1 ./main.sh daemon` (تشغيل في المقدمة مع طباعة السجل)، و`./main.sh service status`.
+
+---
+
+# المرجع التفصيلي
 
 ## التشغيل التلقائي عند تسجيل الدخول (systemd user service)
 
@@ -163,6 +258,7 @@ lib/
   activity.sh          Activity Analyzer: الإحصاءات والملخص والتقرير (awk/sort/uniq، قراءة فقط)
   report.sh            Report Generator: تقارير Session / Application Activity / Usage Summary (يومية وبفترة) بكتابة ذرّية
   service.sh           التشغيل التلقائي: خدمة systemd للمستخدم (install/enable/start/stop/restart/status/logs/uninstall)
+
 conf/                  ignore.list.example · apps.map.example (انسخهما بدون .example للتخصيص)
 data/                  السجلات الخام: sessions.csv · processes.csv · process_details.csv
 reports/               التقارير المولّدة
@@ -177,7 +273,7 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 1. كل `INTERVAL_SEC` ثانية يأخذ `collector.sh` لقطة بأمر `ps` (عمليات المستخدم فقط، دون وسائط).
 2. `detector.sh` يقارنها بالعمليات المتتبَّعة: الجديد يُسجَّل بدايته، والمختفي تُحسب مدته.
    هوية العملية = `PID + وقت البدء الرتيب`، فلا يخدعه إعادة استخدام PID ولا تغيير الساعة.
-3. `storage.sh` يضيف صفًا إلى CSV الشهري (UTF-8 + BOM) عند انتهاء كل عملية؛ و`sessionlog.sh` يسجّل الجلسة في `sessions.csv`.
+3. `storage.sh` يضيف صفًا إلى `processes.csv` (UTF-8 + BOM) عند انتهاء كل عملية؛ و`sessionlog.sh` يسجّل الجلسة في `sessions.csv`.
 4. تُحدَّث `heartbeat` و`active.tsv` باستمرار؛ إن مات البرنامج فجأة تُغلق `recovery.sh`
    الجلسة والعمليات المفتوحة عند آخر heartbeat (الحالة `CRASHED` / `POWER_LOSS`).
 5. أمر `SIGTERM` (إيقاف/تسجيل خروج/إطفاء) يُغلق كل شيء بشكل نظيف (`COMPLETED`).
@@ -226,7 +322,7 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 | `Username` · `User_ID` | `whoami` و UID |
 | `Login_Date` · `Login_Time` | بداية الجلسة (UTC) |
 | `Logout_Date` · `Logout_Time` | نهايتها (UTC) — فارغان أثناء الجلسة |
-| `Duration_Seconds` | المدة بالثواني (من الساعة الرتيبة، لا تتأثر بتغيير الوقت). الدقائق تظهر في `sessions` وفي `05_sessions.csv` بالتقرير |
+| `Duration_Seconds` | المدة بالثواني (من الساعة الرتيبة، لا تتأثر بتغيير الوقت). الدقائق تظهر في `sessions` وفي `session_report.csv` |
 | `Status` | انظر الجدول |
 
 | Status | معناه | وقت النهاية |
@@ -266,7 +362,6 @@ docs/DESIGN.md         وثيقة التصميم الكاملة
 
 **الأيام:** العدّ (جلسات، عمليات، إطلاقات) في **يوم البدء**، والمدد **تُقسَّم عند منتصف الليل** وتُقصّ على الفترة المطلوبة. `--utc-offset` يحرّك حدود اليوم فقط (المخزَّن يبقى UTC).
 
-**ملفات `report`:** `01_summary` · `02_most_used_applications` · `03_background_processes` · `04_daily_usage` · `05_sessions` (بعدد العمليات لكل جلسة) · `06_process_durations` (مدة كل عملية + هل انتهت طبيعيًا) · `07_data_quality` · `08_report.txt` (التقرير الكامل: Total Sessions / Total Processes / Most Used Applications / Total Usage Duration / Average Process Duration / Daily Usage Statistics).
 ### مولّد التقارير: Report Generator (`lib/report.sh`)
 
 ثلاثة تقارير CSV جاهزة لـ Excel، تُنتَج **لكل يوم** أو **لأي فترة**:
@@ -306,20 +401,22 @@ install/install.sh --with-daily-reports       # مؤقّت systemd: تقرير �
 
 ## حدود معروفة
 
-- **العمليات الأقصر من فترة الفحص** (تبدأ وتنتهي بين فحصين) لا يمكن رؤيتها بالاستعلام الدوري دون صلاحيات خاصة؛ تُرصد فقط إن صادفها فحص. خفّض `INTERVAL_SEC` في `config.sh` (حتى 1) لالتقاط المزيد.
-- `End_Time` وقت **الاكتشاف** (متأخر حتى فترة فحص). `Start_Time` دقته ±1 ثانية (مشتق من «الآن − etimes»).
-- القتل بـ`SIGKILL` يُسجَّل `COMPLETED` كأي انتهاء: لا يمكن لمستخدم عادي معرفة سبب انتهاء عملية ليست ابنته.
-- CPU/الذاكرة: آخر قيمة رُصدت قبل الانتهاء (CPU = ثوانٍ تراكمية، والذاكرة RSS مع الذروة).
-- **الاستهلاك المقاس** (فاصل 5 ثوانٍ، 281 عملية): ‎0.6% CPU و6 MB RAM؛ بفاصل ثانية: ‎2.7% CPU.
-- المراقبة لحساب المستخدم الحالي فقط ولا تستخدم `sudo` ولا تقرأ عمليات الآخرين.
-
-- **الدقة:** العمليات الأقصر من `INTERVAL_SEC` قد لا تُلتقط، ووقت الانتهاء هو وقت *اكتشافه* (تأخير حتى فاصل واحد).
-- العمليات التي كانت تعمل قبل بدء الجلسة تُوسم `started_before_session=yes`.
-- التقارير اليومية تقسّم الجلسات والعمليات العابرة لمنتصف الليل على يومين؛ الإحصاءات اليومية بتوقيت UTC ما لم تُمرَّر `--utc-offset` (إزاحة ثابتة، بلا توقيت صيفي).
-- لم تُنفَّذ بعد (انظر `docs/DESIGN.md` §14): ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي، مناطق زمنية بالاسم في الإحصاءات اليومية.
+- **العمليات الأقصر من فترة الفحص** (تبدأ وتنتهي بين فحصين) لا تُرى إلا إن صادفها فحص (احتمالًا بنسبة عمرها/الفاصل)، وإذا رُصدت **تُسجَّل بمدة مقرَّبة إلى الفاصل** (مثلًا عملية عمرها 0.1 ث سُجّلت 1 ث). خفّض `INTERVAL_SEC` (حتى 1) لالتقاط المزيد.
+- `End_Time` وقت **الاكتشاف** (يتأخر حتى فاصل فحص). `Start_Time` بدقة ±1 ثانية (مشتق من `uptime − etimes`، كلاهما مقتطع للثانية).
+- القتل بـ`SIGKILL` يُسجَّل `COMPLETED` كأي انتهاء: لا يعرف المستخدم العادي سبب انتهاء عملية ليست ابنته.
+- CPU/الذاكرة: آخر قيمة رُصدت قبل الانتهاء (CPU ثوانٍ تراكمية، والذاكرة RSS مع الذروة).
+- النواة تقتطع اسم العملية (`comm`) عند 15 بايتًا؛ الاسم الكامل للملف التنفيذي في `Command_Name`.
+- **الاستهلاك المقاس** (30 ثانية، 143 عملية للمستخدم): فاصل 1 ث ≈ 2.9% CPU و6 MB؛ فاصل 5 ث ≈ 0.6% CPU و6 MB (انظر `TEST_REPORT.md` TC-20). يزداد مع عدد العمليات.
+- المراقبة لحساب المستخدم الحالي فقط، بلا `sudo`، ولا تقرأ عمليات الآخرين.
+- التقارير اليومية تقسّم الجلسات والعمليات العابرة لمنتصف الليل على يومين؛ الأيام بتوقيت UTC ما لم تُمرَّر `--utc-offset` (إزاحة ثابتة، بلا توقيت صيفي).
+- لم تُنفَّذ: ملف `.xlsx` متعدد الأوراق، فاصل `;` للتقارير، تقرير ساعي، مناطق زمنية بالاسم في الإحصاءات اليومية، واجهة رسومية (مستبعدة عمدًا). القائمة الكاملة في [`FINAL_SUMMARY.md`](FINAL_SUMMARY.md).
 
 ## الاختبار
 
 ```bash
-bash tests/run_all.sh     # فحص الصياغة (bash -n) + shellcheck (إن وُجد) + اختبار smoke في بيئة معزولة
+bash tests/run_all.sh        # كل المجموعات (≈ 10 دقائق): bash -n + shellcheck إن وُجد + sessions/processes/activity/reports/service/review + smoke
+bash tests/e2e_plan.sh       # خطة الحالات العشرين بتطبيقات حقيقية (≈ 4 دقائق)
+bash tests/final_check.sh    # القبول: استنساخ نظيف للكود المُودَع وتشغيل التعليمات كما في هذا الملف
 ```
+
+الاختبارات تعمل في مجلدات مؤقتة ولا تلمس بياناتك. لا تشغّل مجموعتين معًا (المراقب يرى عمليات الأخرى). النتائج الفعلية وما لم يُختبر: [`TEST_REPORT.md`](TEST_REPORT.md).

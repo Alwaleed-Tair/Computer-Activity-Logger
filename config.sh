@@ -12,7 +12,7 @@
 : "${CAL_ROOT:?config.sh must be sourced from main.sh (CAL_ROOT is not set)}"
 
 # --- Identity / version ------------------------------------------------------
-CAL_VERSION="0.6.0"
+CAL_VERSION="0.6.1"
 CAL_USER="${CAL_USER:-$(whoami)}"   # current user name (whoami)
 CAL_UID="${CAL_UID:-$EUID}"                # numeric user id (UID)
 CAL_HOST="${CAL_HOST:-$(hostname 2>/dev/null || echo unknown)}"
@@ -98,16 +98,32 @@ MIN_FREE_MB="${MIN_FREE_MB:-50}"         # warn when free disk space drops below
 RETENTION_DAYS="${RETENTION_DAYS:-365}"  # informational; purge is manual
 
 # --- Optional local overrides (git-ignored) ----------------------------------
+# config.local.sh is SOURCED (it runs as you): only accept it if you own it and nobody else can
+# write to it, otherwise another user could run commands with your rights.
 if [[ -r $CAL_ROOT/config.local.sh ]]; then
-    # shellcheck source=/dev/null
-    source "$CAL_ROOT/config.local.sh"
+    _cfg_mode=$(stat -c %a -- "$CAL_ROOT/config.local.sh" 2>/dev/null || echo 777)
+    if [[ -O $CAL_ROOT/config.local.sh && $(( 8#$_cfg_mode & 8#022 )) -eq 0 ]]; then
+        # shellcheck source=/dev/null
+        source "$CAL_ROOT/config.local.sh"
+    else
+        echo "config: ignoring $CAL_ROOT/config.local.sh (must be owned by you and not group/world-writable: chmod 600)" >&2
+    fi
+    unset _cfg_mode
 fi
 
 # -----------------------------------------------------------------------------
 # config_validate — reject nonsensical values early (returns 1 on error).
 # -----------------------------------------------------------------------------
 config_validate() {
-    local ok=0
+    local ok=0 _v
+    # Plain decimal numbers only: "08" would be octal (an error) in arithmetic.
+    for _v in INTERVAL_SEC MIN_DURATION_SEC STOP_TIMEOUT_SEC MIN_FREE_MB LOG_MAX_BYTES; do
+        if [[ ${!_v-} =~ ^[0-9]+$ ]]; then printf -v "$_v" '%s' $(( 10#${!_v} )); fi
+    done
+    if ! [[ ${LOG_MAX_BYTES-} =~ ^[0-9]+$ ]]; then
+        echo "config: LOG_MAX_BYTES must be a non-negative integer (got '${LOG_MAX_BYTES-}')" >&2
+        ok=1
+    fi
     if ! [[ $INTERVAL_SEC =~ ^[0-9]+$ ]] || (( INTERVAL_SEC < 1 || INTERVAL_SEC > 60 )); then
         echo "config: INTERVAL_SEC must be an integer between 1 and 60 (got '$INTERVAL_SEC')" >&2
         ok=1

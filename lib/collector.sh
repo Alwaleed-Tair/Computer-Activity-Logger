@@ -32,15 +32,24 @@ declare -gA CUR_RSS=()      # resident memory, KiB
 declare -gA _OWN=()         # pid -> 1/0 memo for collector_is_own (per scan)
 COLLECTOR_UPTIME=0
 COLLECTOR_EPOCH=0
+_PS_LOCALE=""            # locale for ps: UTF-8 when available (ps prints non-ASCII names as "?" in the C locale)
+
+# _collector_pick_locale — once: C.UTF-8 if this system has it, otherwise plain C.
+_collector_pick_locale() {
+    local cs
+    cs=$(LC_ALL=C.UTF-8 locale charmap 2>/dev/null || true)
+    if [[ $cs == UTF-8 ]]; then _PS_LOCALE=C.UTF-8; else _PS_LOCALE=C; fi
+}
 
 # collector_snapshot — fill the CUR_* arrays. Returns 1 (leaving the previous
 # state untouched) when ps fails or returns nothing, so a glitch can never
 # look like "every process ended".
 collector_snapshot() {
     local out pid ppid etimes tty user cpu rss comm up now
+    if [[ -z $_PS_LOCALE ]]; then _collector_pick_locale; fi
     common_uptime up
     common_now_epoch now
-    out=$(LC_ALL=C ps -u "$EUID" -o pid=,ppid=,etimes=,tty=,user:32=,cputimes=,rss=,comm= 2>/dev/null) || return 1
+    out=$(LC_ALL=$_PS_LOCALE ps -u "$EUID" -o pid=,ppid=,etimes=,tty=,user:32=,cputimes=,rss=,comm= 2>/dev/null) || return 1
     if [[ -z $out ]]; then return 1; fi
 
     COLLECTOR_UPTIME=$up
@@ -83,20 +92,25 @@ collector_is_own() {
     (( r == 1 ))
 }
 
-# collector_load_exe PID... — print "pid<TAB>basename-of-executable" for every PID
-# whose /proc/PID/exe link is readable. ONE `stat` call for the whole batch
-# (instead of a fork per process). The path is reduced to its base name.
+# collector_exe_names PID... — print "pid<TAB>basename-of-executable" for every PID
+# whose /proc/PID/exe link is readable. ONE `find` call for the whole batch (instead of a
+# fork per process). `find -printf %l` prints the link target RAW — unlike `stat -c %N`,
+# which shell-quotes it and turned Arabic/UTF-8 or tab-containing names into
+# `'$'\330\252...` garbage. NUL-terminated records survive any file name; control
+# characters in the name are replaced by '?' so a name can never break the TAB-separated
+# state records. Unreadable links are simply skipped.
 collector_exe_names() {
-    local line pid path
+    local rec pid path base
     if (( $# == 0 )); then return 0; fi
     local -a args=()
     for pid in "$@"; do args+=("/proc/$pid/exe"); done
-    while IFS= read -r line; do
-        # shellcheck disable=SC2016  # the quotes below are literal characters of stat's output
-        if [[ $line =~ ^\'/proc/([0-9]+)/exe\'\ -\>\ \'(.*)\'$ ]]; then
-            pid=${BASH_REMATCH[1]}; path=${BASH_REMATCH[2]}
-            path=${path% (deleted)}
-            printf '%s\t%s\n' "$pid" "${path##*/}"
+    while IFS= read -r -d '' rec; do
+        pid=${rec#/proc/}; pid=${pid%%/*}
+        path=${rec#*$'\t'}
+        path=${path% (deleted)}
+        base=${path##*/}
+        if [[ $pid =~ ^[0-9]+$ && -n $base ]]; then
+            printf '%s\t%s\n' "$pid" "${base//[[:cntrl:]]/?}"
         fi
-    done < <(stat -c %N "${args[@]}" 2>/dev/null || true)   # unreadable links: simply skipped
+    done < <(find "${args[@]}" -maxdepth 0 -printf '%p\t%l\0' 2>/dev/null || true)
 }

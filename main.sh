@@ -128,6 +128,7 @@ cmd_consent() {
 }
 
 cmd_start() {
+    local i
     consent_require || exit 1
     storage_init || main_die "cannot create directories"
     if daemon_is_running; then echo "Already running (pid $(cat "$PID_FILE" 2>/dev/null))."; return 0; fi
@@ -136,7 +137,11 @@ cmd_start() {
     else
         nohup "$CAL_ROOT/main.sh" daemon >>"$LOG_FILE" 2>&1 </dev/null &
     fi
-    sleep 1
+    # Poll (up to 5 s): on a loaded machine the daemon needs more than a second to take its lock.
+    for (( i = 0; i < 25; i++ )); do
+        if daemon_is_running; then break; fi
+        sleep 0.2
+    done
     if daemon_is_running; then echo "Started (pid $(cat "$PID_FILE" 2>/dev/null))."; else
         main_die "failed to start — see $LOG_FILE"; fi
 }
@@ -303,7 +308,7 @@ cmd_report() {
 }
 
 cmd_purge() {
-    local mode="" before="" yes=0 ans=""
+    local mode="" before="" yes=0 ans="" purge_fd
     while (( $# > 0 )); do
         case $1 in
             --all) mode=all ;;
@@ -314,7 +319,11 @@ cmd_purge() {
         shift
     done
     [[ -n $mode ]] || main_die "purge needs --all or --before YYYY-MM-DD"
-    if daemon_is_running; then main_die "stop the logger first (./main.sh stop)"; fi
+    storage_init || main_die "cannot create directories"
+    # Hold the daemon lock while rewriting the CSVs: a logger cannot start in the middle of a
+    # purge (its appended rows would be lost by the file replacement).
+    exec {purge_fd}>"$LOCK_FILE" || main_die "cannot open $LOCK_FILE"
+    flock -n "$purge_fd" || main_die "stop the logger first (./main.sh stop)"
     if [[ $mode == before ]]; then
         main_valid_date "$before" && [[ -n $before ]] || main_die "invalid --before date"
         echo "Process rows with Start_Time < $before, and session rows with Login_Date < $before, will be deleted."

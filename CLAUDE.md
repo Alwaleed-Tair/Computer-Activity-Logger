@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 **Computer Activity Logger** — a Bash-only tool that, with the user's explicit consent, runs in the background after login and logs process start/end times and durations to CSV files, then produces statistics and Excel-openable reports.
 
-**Status:** v0.6 — session logger, process monitor, activity analyzer, report generator and automatic startup (systemd user service) implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
+**Status:** v0.6.1 — session logger, process monitor, activity analyzer, report generator and automatic startup (systemd user service) implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
 
 ## Language
 
@@ -18,7 +18,7 @@ Guidance for Claude Code when working in this repository.
 - **Bash only** (≥ 4.3) plus standard Linux tools (`ps`, `awk`, `sort`, `flock`, `systemctl`, `zip`…). **No Python, C#, Java**, or other runtimes for project functionality.
 - **No GUI.** Terminal + CSV only.
 - **Privacy:** never record keystrokes, passwords, window titles, file/screen contents, command-line arguments, or `/proc/*/environ`. No hidden monitoring; no network access.
-- Logging must start only after explicit, recorded user consent (`~/.config/cal/consent`).
+- Logging must start only after explicit, recorded user consent (file `.consent` in the project root, `CONSENT_FILE`; see DESIGN §16).
 - Per-user, no root required. Files `600`, directories `700` (`umask 077`).
 
 ## Architecture (summary)

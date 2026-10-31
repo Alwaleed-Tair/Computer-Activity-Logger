@@ -280,7 +280,8 @@ expect_grep "e2e: App Y ranked" 'App Y' "$rep"
 activity_prepare "" "" 0
 e2e=$(activity_summary)
 ps2=$(cell "$e2e" 1 Process_Seconds_Sum 2 | tr -d '"'); ua2=$(cell "$e2e" 1 User_App_Active_Time_Seconds 2 | tr -d '"')
-expect_between "e2e: two simultaneous 8 s apps -> about 8-11 s of application time" 8 11 "$ua2"
+# Start_Time has a documented precision of +-1 s (uptime and etimes are both truncated), so an 8 s app may be measured as 7..9 s.
+expect_between "e2e: two simultaneous 8 s apps -> about 7-11 s of application time (not 16)" 7 11 "$ua2"
 if awk -v p="$ps2" -v u="$ua2" 'BEGIN { exit !(p >= u + 6) }'; then pass "e2e: process-seconds ($ps2) clearly exceeds application time ($ua2) — not summed"; else fail "e2e: process-seconds must exceed app time" "ps=$ps2 ua=$ua2"; fi
 expect_between "e2e: each app ran ~8 s" 7 11 "$(activity_apps User_Application 5 | awk -F, '$2=="\"App X\"" {print $8}')"
 expect_eq "e2e: both are launches (not 'found running')" "2" "$(cell "$e2e" 1 User_Application_Launches 2 | tr -d '"')"

@@ -205,11 +205,14 @@ common_sleep_init() {
 
 # common_sleep SECONDS — interruptible sleep.
 common_sleep() {
+    local __s
     if [[ -n ${_CAL_SLEEP_FD:-} ]]; then
         read -r -t "$1" -u "$_CAL_SLEEP_FD" _ || true
     else
         sleep "$1" &
-        wait $! || true
+        __s=$!
+        # interrupted by a signal (stop): do not leave the sleep behind holding inherited fds
+        wait "$__s" || kill "$__s" 2>/dev/null || true
     fi
     return 0
 }

@@ -38,6 +38,7 @@ PROCESS_STATUS_OK=" COMPLETED SESSION_END RECOVERED "
 # Rows that could not be written yet: entries are "kind<TAB>line" (kind = processes|details).
 declare -ga STORAGE_PENDING=()
 STORAGE_PENDING_MAX=10000
+STORAGE_DIRTY=0      # 1 after a failed append: the file may end with a partial line
 
 # Create directories with private permissions.
 storage_init() {
@@ -57,6 +58,7 @@ storage_prepare_csv() {
         IFS= read -r first <"$file" || true
         first=${first#$'\xEF\xBB\xBF'}; first=${first%$'\r'}
         if [[ $first == "$header" ]]; then
+            chmod 600 -- "$file" 2>/dev/null || true      # our own file: never group/world readable
             if [[ -n $(tail -c1 -- "$file" 2>/dev/null) ]]; then
                 log_warn "$file did not end with a newline (torn write?) — repaired"
                 printf '\n' >>"$file" || return 1
@@ -83,7 +85,13 @@ storage_write_line() {
     if [[ $kind == processes ]]; then file=$PROCESSES_FILE; header=$PROCESSES_HEADER
     else file=$PROCESS_DETAILS_FILE; header=$DETAILS_HEADER; fi
     if [[ ! -s $file ]]; then storage_prepare_csv "$file" "$header" || return 1; fi
-    printf '%s\n' "$line" >>"$file"
+    if (( STORAGE_DIRTY == 1 )); then
+        # An earlier write failed (disk full?) and may have left half a line: end it, so the
+        # next row starts on its own line instead of being glued to the fragment.
+        if [[ -n $(tail -c1 -- "$file" 2>/dev/null) ]]; then printf '\n' >>"$file" || return 1; fi
+        STORAGE_DIRTY=0
+    fi
+    if ! printf '%s\n' "$line" >>"$file"; then STORAGE_DIRTY=1; return 1; fi
 }
 
 # storage_flush_pending — retry rows that failed earlier.
@@ -184,12 +192,12 @@ storage_purge_before() {
 
 # storage_save_active — atomically persist the tracked-process table.
 storage_save_active() {
-    local pid tmp="$ACTIVE_FILE.tmp"
-    : >"$tmp" || return 1
-    for pid in "${!ACTIVE[@]}"; do
-        printf '%s\n' "${ACTIVE[$pid]}" >>"$tmp"
-    done
-    mv -f "$tmp" "$ACTIVE_FILE"
+    local pid tmp="$ACTIVE_FILE.tmp" buf=""
+    for pid in "${!ACTIVE[@]}"; do buf+="${ACTIVE[$pid]}"$'\n'; done
+    # ONE write, checked: a full disk must never replace a good table with a truncated one
+    # (the processes missing from it would be lost by recovery).
+    if ! printf '%s' "$buf" >"$tmp"; then rm -f -- "$tmp"; return 1; fi
+    mv -f -- "$tmp" "$ACTIVE_FILE"
 }
 
 # storage_write_heartbeat EPOCH UPTIME BOOT SESSION COUNT PAUSED (atomic)
