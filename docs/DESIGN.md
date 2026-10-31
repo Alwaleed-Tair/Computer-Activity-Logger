@@ -728,3 +728,31 @@ kill -9        : التشغيل التالي: recovery → sessionlog_close(CRAS
 **اختبار الطفرات:** عشر طفرات متعمدة في المولّد (عودة عيب `read`، كتابة غير ذرّية، المانيفست أولًا، لا تجميد لـFINAL، لا أرشفة، لا حماية صيغ، LF بدل CRLF، لا قفل، لا ترتيب زمني، البصمة بلا التخطيط) اكتُشفت كلها بالفحوص المقصودة (4–29 إخفاقًا لكل منها).
 
 **حدود صريحة:** لم أشغّل Excel نفسه (LibreOffice بديل وليس مطابقًا 100%). التواريخ نص `YYYY-MM-DD HH:MM:SS` يتعرف عليه Excel تلقائيًا لكن LibreOffice الافتراضي يبقيه نصًا. الفاصل `,` ثابت: في إعدادات إقليمية تستخدم `;` يُستورد الملف عبر *Data ▸ From Text/CSV*. لا تشغّل مجموعتَي اختبار معًا على نفس الجهاز بلا حاجة (تريان عمليات بعضهما).
+
+## 21. Automatic Startup (v0.6)
+
+**الهدف:** تشغيل المسجّل تلقائيًا عند تسجيل دخول المستخدم، بلا root، ظاهرًا للمستخدم، وبنسخة واحدة دائمًا.
+
+**الآلية:** وحدة systemd *للمستخدم* `~/.config/systemd/user/cal.service` تُولَّد من `install/cal.service.template` بواسطة `lib/service.sh` (`./main.sh service install|enable|disable|start|stop|restart|status|logs|show-unit|uninstall`). `WantedBy=default.target`: تبدأ مع مدير المستخدم (`systemd --user`) الذي يشغّله logind عند **أول دخول** ويوقفه عند **آخر خروج** (ما لم يُفعَّل lingering). لا `User=` ولا `sudo` ولا أهداف نظام.
+
+**تسجيل الدخول ≠ إقلاع الجهاز:** `Login_Time` هو لحظة بدء المسجّل. `service status` يعرض «Machine boot» (من `btime` في `/proc/stat`) و«Starts at» (حسب `loginctl show-user -p Linger`). تسجيل دخول ثانٍ لا يبدأ نسخة ثانية.
+
+**سياسة الفشل:** `Restart=on-failure` · `RestartSec=5` · `StartLimitBurst=5` خلال `StartLimitIntervalSec=300` (ثم تبقى `failed` ويفكّها `service start` بـ`reset-failed`) · `RestartPreventExitStatus=3 4` · `Type=notify` (+`NotifyAccess=all`) فلا يُعلن النجاح إلا بعد فتح الجلسة · `WatchdogSec = 3×INTERVAL_SEC + 30` والحلقة ترسل `WATCHDOG=1` بعد كل دورة (يعالج صنف عيب تجمّد حلقة القراءة من `/proc`) · `ConditionPathExists=<consent>` فتُتخطى الوحدة إن سُحبت الموافقة.
+
+**رموز خروج `main.sh daemon`:** 0 إيقاف نظيف · 1 خطأ (يُعاد التشغيل) · 3 `EXIT_ALREADY_RUNNING` · 4 `EXIT_NO_CONSENT` (3 و4 لا تُعاد).
+
+**نسخة واحدة:** `flock` على `state/daemon.lock` يُؤخذ قبل `storage_prepare_all` (قبل لمس أي ملف بيانات)؛ تحرّره النواة عند موت صاحبه. الخدمة و`start` اليدوي وautostart كلها تمر به. `service start/restart` يرفضان إن كانت نسخة يدوية تعمل. الاحتمال الوحيد لنسختين (قفل على نظام ملفات NFS لا يدعم flock) خارج النطاق.
+
+**الإيقاف الآمن:** `KillMode=mixed` + `KillSignal=SIGTERM` + `TimeoutStopSec=STOP_TIMEOUT_SEC+5`؛ المسجّل يعالج TERM فيغلق الجلسة (`COMPLETED`) والعمليات (`SESSION_END`) ويمسح الحالة ويحرّر القفل. بعد المهلة `SIGKILL` وهو آمن بفضل التعافي (§8).
+
+**سجل الأخطاء:** `StandardError=append:state/service-error.log` (يتطلب systemd ≥ 240) · `UMask=0077` · يُدوَّر في `ExecStartPre=-main.sh rotate-logs` لأن systemd يفتح الملف لكل تشغيل. الرسائل العادية → journal.
+
+**تقييد:** `NoNewPrivileges=yes` · `Nice=19` · `IOSchedulingClass=idle`. تجنّبنا `PrivateTmp/ProtectSystem` لأنها قد تفشل في وحدات المستخدم على Ubuntu (قيود user namespaces).
+
+**كتابة الوحدة:** تُبنى في مجلد مخفي بجوار وجهتها، تُفحص بـ`systemd-analyze verify`، ثم `mv` ذرّي. المسارات: `%` تُضاعَف (specifiers)، والمسافات تعمل بالاقتباس، وتُرفض المسارات النسبية أو التي فيها سطر جديد/اقتباس/شرطة مائلة عكسية. (`$` لا يحتاج هروبًا: الاستبدال يخص وسائط الأوامر فقط.)
+
+**الاختبار (`tests/test_service.sh`، 168 فحصًا):** الجزء A بلا systemd (توليد الوحدة، الهروب، رموز الخروج، التثبيت بلا مدير، التدوير)؛ الجزء B على **مدير systemd 255 حقيقي** يُنشئه `tests/usermgr.sh` — أصلي إن وُجد (مستخدم عادي على Ubuntu حقيقية)، وإلا مستخدم مؤقت + مساحة أسماء mount خاصة (cgroup2 و`/run/systemd/system` فيها فقط) داخل حاوية بلا systemd. يغطي: التثبيت/التفعيل/التشغيل بمستخدم غير root، الإيقاف الآمن (< 5 ث، COMPLETED، SESSION_END)، `restart`، watchdog سليم لا يُعيد، `kill -9`، تجميد `SIGSTOP`، حد البدء، النسخة الواحدة بكل الطرق، تعارض مع نسخة يدوية (خروج 3 بلا إعادة)، غياب الموافقة (خروج 4)، صلاحيات سجل الأخطاء، **محاكاة الدخول/الخروج** بإعادة تشغيل المدير، مسار فيه مسافة، والإزالة. اختبار طفرة: حذف `RestartPreventExitStatus` يُسقط ثلاثة فحوص.
+
+**دروس هذا الإصدار:** (1) `Type=notify` يجعل `systemctl start` يفشل بصدق بدل أن يبدو ناجحًا ثم يموت. (2) الاختبار الأول سرّب مسجّلًا لأنني أرسلت الإشارة إلى صدفة فرعية لا إلى العملية الفعلية. (3) `$$` في مسار التنفيذ يبقى حرفيًا (لا استبدال متغيرات للمسار) فكسر الاختبار الصارم مسار الأمثلة الغريبة. (4) `Documentation=file://` لا يقبل مسافات.
+
+**حدود صريحة:** لم يُختبر مسار logind/PAM الحقيقي ولا جلسة سطح مكتب (الدخول مُحاكى بإعادة تشغيل مدير المستخدم). ولم تُجرَّب إعادة إقلاع كاملة لجهاز Ubuntu.

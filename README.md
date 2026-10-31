@@ -7,7 +7,7 @@
 
 ثم يحوّل ذلك إلى **إحصائيات** و**تقارير CSV** تُفتح مباشرة في Microsoft Excel.
 
-> الحالة: **v0.5 — Report Generator مكتمل** (تقارير Session / Application Activity / Usage Summary يومية وبفترة، بكتابة ذرّية وحماية للتاريخ) فوق Activity Analyzer وProcess Monitor وSession Logger.
+> الحالة: **v0.6 — التشغيل التلقائي (خدمة systemd للمستخدم) مكتمل** فوق Report Generator (تقارير Session / Application Activity / Usage Summary يومية وبفترة، بكتابة ذرّية وحماية للتاريخ) فوق Activity Analyzer وProcess Monitor وSession Logger.
 > التصميم الكامل في [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## الخصوصية (ملتزمون بها)
@@ -24,7 +24,7 @@
 ## المتطلبات
 
 Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df date`
-(اختياريًا: `column` لتنسيق الجداول، `systemctl` للتشغيل التلقائي). للتحقق: `./main.sh doctor`
+(اختياريًا: `column` لتنسيق الجداول، `systemctl` و`systemd-notify` للتشغيل التلقائي). للتحقق: `./main.sh doctor`
 
 ## التشغيل السريع
 
@@ -42,15 +42,107 @@ Bash ≥ 4.3 وأدوات Linux القياسية: `ps awk sort cut head flock df
 خيارات مفيدة: `stats --from 2026-10-01 --to 2026-10-31 --top 5` ·
 `INTERVAL_SEC=2 ./main.sh start` · `./main.sh purge --before 2026-01-01`.
 
-### التشغيل التلقائي (بدون root)
+## التشغيل التلقائي عند تسجيل الدخول (systemd user service)
+
+خدمة **على مستوى المستخدم** (`systemctl --user`): تعمل بصلاحياتك أنت فقط، **بلا root ولا sudo**، ومعلنة وظاهرة لك: `systemctl --user list-units`، وأوامر `./main.sh service …` أدناه، وسجل أخطائها في ملف مستقل. لا شيء يعمل مخفيًا ولا قبل موافقتك.
+
+### ⚠️ تسجيل الدخول ليس تشغيل الجهاز
+
+| اللحظة | ما الذي يبدأ عندها |
+|---|---|
+| **إقلاع الجهاز (boot)** | لا تبدأ خدمات المستخدم (إلا إن فعّلت *lingering*، انظر أدناه) |
+| **أول تسجيل دخول لك** (شاشة، TTY أو SSH) | يشغّل systemd *مدير المستخدم* (`systemd --user`) ثم يشغّل خدمتنا |
+| **آخر تسجيل خروج لك** | يوقف systemd مدير المستخدم فتُوقَف الخدمة بأمان (تُحفظ الجلسة) |
+
+لذلك `Login_Time` في `sessions.csv` هو لحظة **بدء المسجّل** (دخولك)، وقد يتأخر ساعات عن إقلاع الجهاز، ولا يُعدّ لحظة تشغيل الجهاز. يعرض `./main.sh service status` الاثنين معًا: «Machine boot» (من `/proc/stat`) و«Starts at». دخول SSH ثانٍ أو تبديل المستخدم السريع لا يبدأ نسخة ثانية (انظر «نسخة واحدة فقط»). لتبدأ الخدمة مع الإقلاع دون دخولك: `loginctl enable-linger "$USER"` (اختياري، وحينها تُسجَّل جلسة منذ الإقلاع حتى لو لم تدخل — فكّر في ذلك قبل تفعيله؛ ولإلغائه `loginctl disable-linger "$USER"`).
+
+الحد الأدنى: Ubuntu 20.04+ (systemd ≥ 240 لدعم `StandardError=append:`؛ وUbuntu 24.04 فيها 255).
+
+### التثبيت (Installation)
 
 ```bash
-install/install.sh            # يعرض الإشعار ويسجّل الموافقة ثم يفعّل خدمة systemd للمستخدم
-install/uninstall.sh          # يزيل التشغيل التلقائي (تبقى البيانات)
+git clone <repo> && cd Computer-Activity-Logger
+./main.sh doctor              # فحص البيئة (يذكر إن كان مدير systemd للمستخدم متاحًا)
+./main.sh consent             # اقرأ الإشعار واكتب yes — بدون موافقة مسجّلة لا يعمل شيء
+./main.sh service install     # يكتب ~/.config/systemd/user/cal.service (لا يفعّل ولا يشغّل)
 ```
 
-الخدمة تبدأ مع أول تسجيل دخول وتنتهي مع آخر تسجيل خروج؛ فتطابق «جلسة الاستخدام».
-بدون systemd يُستخدم XDG autostart تلقائيًا.
+أو دفعة واحدة (موافقة + تثبيت + تفعيل + تشغيل): `install/install.sh` (أضف `--accept` لتخطي السؤال، و`--with-daily-reports` لمؤقّت التقارير اليومية). `./main.sh service show-unit` يطبع ملف الوحدة قبل التثبيت لتراجعه.
+
+### التفعيل (Enable Service) — يبدأ عند كل تسجيل دخول
+
+```bash
+./main.sh service enable      # ≈ systemctl --user enable cal.service
+./main.sh service disable     # لإيقاف البدء التلقائي (لا يوقف النسخة العاملة)
+```
+
+### التشغيل (Start Service)
+
+```bash
+./main.sh service start       # ≈ systemctl --user start cal.service
+```
+
+يرجع بنجاح فقط حين يكون المسجّل **يسجّل فعلًا** (`Type=notify`: لا يُعلن الجاهزية إلا بعد فتح الجلسة). وإلا يطبع سبب الفشل وآخر أسطر سجل الأخطاء.
+
+### الإيقاف (Stop Service) — آمن
+
+```bash
+./main.sh service stop        # ≈ systemctl --user stop cal.service
+```
+
+يرسل `SIGTERM` فيُغلق المسجّل الجلسة المفتوحة (`COMPLETED`) وكل العمليات المتتبَّعة (`SESSION_END`)، ويكتب الصفوف ويحرّر القفل ثم يخرج (عادةً أقل من ثانية). إن لم ينتهِ خلال `STOP_TIMEOUT_SEC + 5` ثوانٍ يُقتل، وعند التشغيل التالي يغلق التعافي الجلسة (`CRASHED`) فلا يضيع شيء.
+
+### إعادة التشغيل (Restart Service)
+
+```bash
+./main.sh service restart     # يحفظ ويغلق الجلسة الحالية ثم تبدأ جلسة جديدة
+```
+
+### حالة الخدمة (Check Service Status)
+
+```bash
+./main.sh service status      # رمز الخروج: 0 تعمل · 3 مثبّتة لكنها متوقفة · 4 غير مثبّتة/لا مدير systemd
+./main.sh service logs 50     # سجل الأخطاء المستقل + journal
+systemctl --user status cal.service      # الأمر الأصلي نفسه
+```
+
+يعرض: ملف الوحدة، مفعّلة أم لا، الحالة ومنذ متى، PID، عدد إعادات التشغيل التلقائية وآخر نتيجة، آخر جلسة، الموافقة، «Starts at» (دخولك أم الإقلاع)، وقت إقلاع الجهاز، ومسار سجل الأخطاء.
+
+### الإزالة (Uninstall)
+
+```bash
+./main.sh service uninstall   # يوقف (مع الحفظ) ثم يعطّل ويحذف ملف الوحدة؛ تبقى بياناتك
+install/uninstall.sh          # الخدمة + مؤقّت التقارير + autostart + أي نسخة يدوية
+./main.sh purge --all         # (اختياري) حذف البيانات نفسها
+```
+
+### سياسة إعادة التشغيل عند الفشل
+
+| الحالة | السلوك |
+|---|---|
+| انهيار / `kill -9` / خروج بخطأ | `Restart=on-failure` بعد 5 ثوانٍ؛ ويصلح التعافي الجلسة المقطوعة (`CRASHED`) |
+| حلقة المراقبة تجمّدت (لا نبضات) | **watchdog**: بعد `3×INTERVAL_SEC+30` ثانية يقتلها systemd ويعيد تشغيلها |
+| فشل متكرر (> 5 مرات في 5 دقائق) | تتوقف الوحدة بحالة `failed` بدل التكرار اللانهائي؛ أصلح السبب ثم `./main.sh service start` |
+| إيقاف عادي (`stop`) أو خروج 0 | لا إعادة تشغيل |
+| خروج 3 (نسخة أخرى تعمل) أو 4 (لا موافقة) | **لا إعادة تشغيل** (لن تفيد) |
+| سُحبت الموافقة | تتخطى systemd الوحدة (`ConditionPathExists`) ولا يُسجَّل شيء |
+
+### أخطاء بدء التشغيل: ملف مستقل
+
+`state/service-error.log` (صلاحيته `600`، يُدوَّر عند تجاوز `LOG_MAX_BYTES`) يستقبل stderr للخدمة فقط؛ الرسائل العادية تذهب إلى journal. مثال: `another instance of the logger is already running (pid 4242): this one exits and will not be restarted`. اعرضه بـ `./main.sh service logs`.
+
+### نسخة واحدة فقط
+
+مرجع الحقيقة قفل `flock` على `state/daemon.lock` يُؤخذ **قبل** لمس أي ملف بيانات؛ يحرّره النواة تلقائيًا إن مات صاحبه (حتى بـ`SIGKILL`) فلا يعلق أبدًا. كل المسارات تمر به: الخدمة، `./main.sh start`، autostart، أو `./main.sh daemon` المباشر. نسخة ثانية تخرج بالرمز 3 دون أن تمس البيانات، و`service start` يرفض البدء ما دامت نسخة يدوية تعمل (ويشرح لك كيف توقفها).
+
+### تعديل الإعدادات
+
+الخدمة لا ترث متغيرات بيئة الصدفة. ضع تعديلاتك (`INTERVAL_SEC`, `MIN_DURATION_SEC`، وحتى `SERVICE_NAME`) في **`config.local.sh`** ثم `./main.sh service restart`. إن غيّرت مسار المشروع أو `INTERVAL_SEC` أعد `./main.sh service install` (ثم `restart`) لتتجدد الوحدة.
+
+### ما اختُبر فعليًا وما لم يُختبر
+
+`tests/test_service.sh` (168 فحصًا) يشغّل **مدير systemd 255 حقيقيًا للمستخدم** (على Ubuntu 24.04) ويجرّب: التثبيت والتفعيل والتشغيل (يعمل مستخدمًا عاديًا لا root، `NoNewPrivs=1`)، `status`، الإيقاف الآمن، `restart`، `kill -9` → إعادة تشغيل تلقائية، تجميد (`SIGSTOP`) → watchdog، حد البدء، النسخة الواحدة (الخدمة/يدوي/مباشر)، غياب الموافقة، سجل الأخطاء، **محاكاة الدخول/الخروج** بإعادة تشغيل مدير المستخدم (مفعّلة → تبدأ وحدها؛ معطّلة → لا تبدأ)، مسار فيه مسافة، والإزالة. وتتأكد الاختبارات من قدرتها على الفشل (حذف `RestartPreventExitStatus` يُسقط ثلاثة فحوص).
+**لم يُختبر:** تسجيل دخول رسمي عبر `logind`/PAM وجلسة سطح مكتب رسمية — البيئة حاوية بلا systemd كـPID 1 فشغّلنا مدير المستخدم داخل مساحة أسماء مستقلة. فعلى Ubuntu حقيقية جرّب: `./main.sh service install && ./main.sh service enable` ثم سجّل خروجًا ودخولًا وراجع `./main.sh service status`.
 
 ## هيكل المشروع
 
@@ -70,12 +162,13 @@ lib/
   analyzer.sh          عروض الصفوف: الجلسات والعمليات
   activity.sh          Activity Analyzer: الإحصاءات والملخص والتقرير (awk/sort/uniq، قراءة فقط)
   report.sh            Report Generator: تقارير Session / Application Activity / Usage Summary (يومية وبفترة) بكتابة ذرّية
+  service.sh           التشغيل التلقائي: خدمة systemd للمستخدم (install/enable/start/stop/restart/status/logs/uninstall)
 conf/                  ignore.list.example · apps.map.example (انسخهما بدون .example للتخصيص)
 data/                  السجلات الخام: sessions.csv · processes.csv · process_details.csv
 reports/               التقارير المولّدة
 state/                 حالة التشغيل (pid، heartbeat…) — تُنشأ تلقائيًا ولا تُرفع إلى git
 install/               install.sh · uninstall.sh · قوالب systemd و autostart
-tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (175) · test_activity.sh (127) · test_reports.sh (213) · fixtures.sh · smoke.sh
+tests/                 run_all.sh · test_sessions.sh (75) · test_processes.sh (175) · test_activity.sh (127) · test_reports.sh (213) · test_service.sh (168، مدير systemd حقيقي) · usermgr.sh (بنية الاختبار) · fixtures.sh · smoke.sh
 docs/DESIGN.md         وثيقة التصميم الكاملة
 ```
 

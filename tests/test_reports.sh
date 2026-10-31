@@ -469,7 +469,7 @@ for t in cal-report.service cal-report.timer; do
     expect_eq "$t: every placeholder was replaced" "0" "$(grep -c '@' "$SANDBOX/$t" || true)"
 done
 exec_line=$(grep '^ExecStart=' "$SANDBOX/cal-report.service" | cut -d= -f2-)
-expect_eq "the service runs the daily report command" "$ROOT/main.sh report daily" "$exec_line"
+expect_eq "the service runs the daily report command (path quoted)" "\"$ROOT/main.sh\" report daily" "$exec_line"
 expect_ok "...and that exact command line works (exit 0) — it is what systemd will run" bash -c "$exec_line"
 expect_grep "the timer fires shortly after midnight" 'OnCalendar=\*-\*-\* 00:10:00' "$(cat "$SANDBOX/cal-report.timer")"
 expect_grep "...and catches up days missed while the computer was off" 'Persistent=true' "$(cat "$SANDBOX/cal-report.timer")"

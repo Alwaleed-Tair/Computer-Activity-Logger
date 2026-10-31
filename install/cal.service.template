@@ -1,13 +1,57 @@
+# Computer Activity Logger — systemd USER service
+# -----------------------------------------------------------------------------
+# Installed by `./main.sh service install` into ~/.config/systemd/user/ (no root).
+# It runs as YOU, with your permissions only, and is fully visible:
+#     systemctl --user status @SERVICE_NAME@      ./main.sh service status
+# "WantedBy=default.target" means: it starts when YOUR systemd user manager starts
+# (normally your first login) and stops when it stops (your last logout), unless you
+# enabled lingering — see README ("Login is not boot").
+# The values in this file are filled in by lib/service.sh; do not edit the installed copy,
+# re-run `./main.sh service install` instead (or use `systemctl --user edit`).
+
 [Unit]
-Description=Computer Activity Logger (runs only with the user's recorded consent)
-Documentation=file://@CAL_ROOT@/README.md
+Description=Computer Activity Logger (user-consented activity logging, runs as you)
+# Never starts without your recorded consent (consent withdrawn => the unit is skipped).
+ConditionPathExists=@CONSENT_FILE@
+# Restart policy: at most 5 starts in 5 minutes, then the unit stays "failed" instead of
+# flapping forever; look at the error log and fix the cause.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
-Type=simple
-ExecStart=@CAL_ROOT@/main.sh daemon
+@TYPE_LINES@
+WorkingDirectory=@CAL_ROOT@
+Environment=CAL_LAUNCHER=systemd-user
+# Keep the error log from growing without bound (rotates once it exceeds LOG_MAX_BYTES).
+ExecStartPre=-"@CAL_ROOT@/main.sh" rotate-logs
+ExecStart="@CAL_ROOT@/main.sh" daemon
+
+# --- restart policy ---------------------------------------------------------------
+# Restart after a crash, a kill, a timeout or a watchdog hit; NOT after a clean stop.
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=15
+# 3 = another instance already holds the lock, 4 = no consent on record:
+# retrying cannot help, so do not retry (it would only flap).
+RestartPreventExitStatus=3 4
+SuccessExitStatus=0
+
+# --- safe stop ----------------------------------------------------------------------
+# SIGTERM to the logger only; it closes the open session and every tracked process, writes
+# the CSV rows, releases the lock and exits (usually < 1 s). If it has not finished after
+# TimeoutStopSec it is killed; recovery then repairs the session at the next start.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=@STOP_TIMEOUT@
+TimeoutStartSec=60
+
+# --- logging ----------------------------------------------------------------------------
+# Errors (stderr) go to their own file, readable only by you; normal messages to the journal.
+StandardOutput=journal
+StandardError=append:@ERROR_LOG@
+
+# --- least privilege / politeness -----------------------------------------------------------
+UMask=0077
+NoNewPrivileges=yes
 Nice=19
 IOSchedulingClass=idle
 

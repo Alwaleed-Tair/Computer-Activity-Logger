@@ -34,6 +34,9 @@ bash tests/test_activity.sh || rc=1
 echo "== report generator tests =="
 bash tests/test_reports.sh || rc=1
 
+echo "== automatic startup (systemd user service) tests =="
+bash tests/test_service.sh || rc=1
+
 echo "== smoke test =="
 bash tests/smoke.sh || rc=1
 exit "$rc"

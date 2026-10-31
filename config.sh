@@ -12,7 +12,7 @@
 : "${CAL_ROOT:?config.sh must be sourced from main.sh (CAL_ROOT is not set)}"
 
 # --- Identity / version ------------------------------------------------------
-CAL_VERSION="0.5.0"
+CAL_VERSION="0.6.0"
 CAL_USER="${CAL_USER:-$(whoami)}"   # current user name (whoami)
 CAL_UID="${CAL_UID:-$EUID}"                # numeric user id (UID)
 CAL_HOST="${CAL_HOST:-$(hostname 2>/dev/null || echo unknown)}"
@@ -69,6 +69,16 @@ REPORT_MAX_ROWS="${REPORT_MAX_ROWS:-1000000}"
 REPORT_TOP="${REPORT_TOP:-20}"                         # rows in the "most used applications" list
 REPORT_UTC_OFFSET_SEC="${REPORT_UTC_OFFSET_SEC:-0}"    # day boundaries of reports (0 = UTC; 10800 = +03:00)
 
+# --- Automatic start (systemd --user service) --------------------------------
+# The service runs as YOU (never root) and only while you have a systemd user manager
+# (see README: this is "your login", not "the machine's boot").
+SERVICE_NAME="${SERVICE_NAME:-cal}"                                   # unit name: cal.service
+SERVICE_UNIT_DIR="${SERVICE_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
+SERVICE_ERROR_LOG="${SERVICE_ERROR_LOG:-$STATE_DIR/service-error.log}"  # stderr of the service, its own file
+# Exit codes of `main.sh daemon` that systemd must NOT retry (see install/cal.service.template).
+EXIT_ALREADY_RUNNING=3     # another instance holds the lock
+EXIT_NO_CONSENT=4          # no consent on record
+
 # --- Process log -------------------------------------------------------------
 # processes.csv         : exactly 8 columns, one row per finished process
 #                         (Session_ID,PID,Process_Name,Username,Start_Time,End_Time,
@@ -112,6 +122,10 @@ config_validate() {
     fi
     if ! [[ $REPORT_TOP =~ ^[0-9]+$ ]] || ! [[ $REPORT_UTC_OFFSET_SEC =~ ^-?[0-9]+$ ]] || (( REPORT_UTC_OFFSET_SEC > 50400 || REPORT_UTC_OFFSET_SEC < -50400 )); then
         echo "config: REPORT_TOP must be a number and REPORT_UTC_OFFSET_SEC within +-50400" >&2
+        ok=1
+    fi
+    if ! [[ $SERVICE_NAME =~ ^[A-Za-z0-9_.-]{1,60}$ ]]; then
+        echo "config: SERVICE_NAME may only contain letters, digits, . _ - (got '$SERVICE_NAME')" >&2
         ok=1
     fi
     if ! [[ $STOP_TIMEOUT_SEC =~ ^[0-9]+$ ]] || (( STOP_TIMEOUT_SEC < 1 )); then

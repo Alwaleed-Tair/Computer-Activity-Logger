@@ -22,7 +22,7 @@ export CAL_ROOT
 # --- Load configuration and modules -----------------------------------------
 # shellcheck source=config.sh
 source "$CAL_ROOT/config.sh"
-for _module in common consent storage sessionlog collector detector session recovery daemon analyzer activity report; do
+for _module in common consent storage sessionlog collector detector session recovery daemon analyzer activity report service; do
     # shellcheck source=/dev/null
     source "$CAL_ROOT/lib/${_module}.sh"
 done
@@ -40,7 +40,9 @@ Commands:
   consent [--accept|--revoke]   Show the notice and record / withdraw consent
   start                         Start the logger in the background
   stop                          Stop it (open records are saved first)
-  daemon                        Run in the foreground (used by systemd)
+  service <install|enable|disable|start|stop|restart|status|logs|uninstall>
+                                Automatic start at login (systemd user service, no root)
+  daemon                        Run in the foreground (this is what the service runs)
   status                        Show state, paths and data size
   processes [--running|--apps|--background|--check] [--tail N] [--class C] [--from D] [--to D]
                                 Process log: finished (default) / running now / by application
@@ -343,10 +345,11 @@ cmd_doctor() {
     for c in ps awk sort cut head flock column df date mktemp; do
         if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c"; else echo "  MISSING $c"; bad=1; fi
     done
-    for c in systemctl setsid; do
+    for c in systemctl systemd-notify setsid; do
         if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c (optional)"; else echo "  absent  $c (optional)"; fi
     done
     storage_init && echo "  ok      directories writable" || { echo "  FAIL    directories"; bad=1; }
+    if service_available; then echo "  ok      systemd user manager reachable (service commands work)"; else echo "  info    systemd user service unavailable here: $SVC_WHY"; fi
     if consent_is_granted; then echo "  ok      consent"; else echo "  todo    consent not granted"; fi
     config_validate && echo "  ok      configuration" || bad=1
     return "$bad"
@@ -360,7 +363,9 @@ main() {
     common_require_bash || exit 1
     config_validate || exit 1
     case $cmd in
-        daemon)  CAL_VERBOSE=${CAL_VERBOSE:-0}; daemon_run ;;
+        daemon)  CAL_VERBOSE=${CAL_VERBOSE:-0}; daemon_run ;;           # exit code matters to systemd: see lib/daemon.sh
+        service) service_main "$@" ;;
+        rotate-logs) common_rotate_file "$SERVICE_ERROR_LOG"; common_rotate_log ;;   # run by the unit before each start
         start)   cmd_start ;;
         stop)    cmd_stop ;;
         status)  cmd_status ;;

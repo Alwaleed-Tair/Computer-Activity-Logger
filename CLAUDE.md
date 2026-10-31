@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 **Computer Activity Logger** — a Bash-only tool that, with the user's explicit consent, runs in the background after login and logs process start/end times and durations to CSV files, then produces statistics and Excel-openable reports.
 
-**Status:** v0.5 — session logger, process monitor, activity analyzer and report generator implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
+**Status:** v0.6 — session logger, process monitor, activity analyzer, report generator and automatic startup (systemd user service) implemented and tested. The full spec is in `docs/DESIGN.md` — read it before changing or adding anything, and keep it in sync with the code.
 
 ## Language
 
@@ -36,13 +36,13 @@ Key design rules:
 ```
 main.sh            CLI entry point (dispatches commands to lib/)
 config.sh          all settings (env vars / config.local.sh override)
-lib/*.sh           modules (common, consent, collector, detector, session, sessionlog, activity,
+lib/*.sh           modules (common, consent, collector, detector, session, sessionlog, activity, service,
                    storage, recovery, daemon, analyzer, report)
 conf/              *.example lists (ignore.list, apps.map)
 data/              raw CSV logs (git-ignored)    reports/  generated reports (git-ignored)
 state/             runtime state (git-ignored)
 install/           install.sh, uninstall.sh, systemd/autostart templates
-tests/             run_all.sh, test_sessions.sh, test_processes.sh, test_activity.sh, test_reports.sh, fixtures.sh, smoke.sh
+tests/             run_all.sh, test_service.sh, usermgr.sh, test_sessions.sh, test_processes.sh, test_activity.sh, test_reports.sh, fixtures.sh, smoke.sh
 docs/              DESIGN.md
 ```
 
@@ -54,6 +54,7 @@ bash tests/test_sessions.sh   # session logger tests (75 checks)
 bash tests/test_processes.sh  # process monitor tests (175 checks)
 bash tests/test_activity.sh   # activity analyzer tests (127 checks, known-answer dataset)
 bash tests/test_reports.sh    # report generator tests (213 checks; opens files in LibreOffice if installed)
+bash tests/test_service.sh    # automatic startup tests (168 checks; real systemd user manager, skipped if none can be had)
 bash tests/smoke.sh          # smoke test only
 ./main.sh sessions --check   # validate data/sessions.csv
 ./main.sh doctor             # environment check
@@ -117,3 +118,14 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - An `exit` inside an awk rule runs `END`, and an `exit` there replaces the status: set a flag, `exit` once in `END`.
 - `main_valid_date` must reject impossible dates (round-trip check); don't validate dates by pattern alone.
 - Test hooks: `CAL_NOW_EPOCH` pins the clock, `CAL_TEST_ABORT_AFTER_FILES=N` simulates a crash while publishing. Don't run two test suites at the same time on one machine (the monitor sees the other's processes).
+
+## Automatic startup rules (lib/service.sh, install/cal.service.template)
+
+- **User service only** (`systemctl --user`, unit in `~/.config/systemd/user`). No `User=`, no root/sudo, no system-wide units. Never hide it: it must show in `systemctl --user list-units`.
+- **Login is not boot.** The unit starts with the user manager (first login), not with the machine; `Login_Time` = when the logger started. Keep `service status` printing both, and keep this distinction in README.
+- `main.sh daemon` exit codes are part of the unit's contract: `0` clean, `1` error (restart), `EXIT_ALREADY_RUNNING=3`, `EXIT_NO_CONSENT=4` (listed in `RestartPreventExitStatus`; never retried). Don't change them without changing the template and `tests/test_service.sh`.
+- **Take the flock before touching any data file** (`daemon_run`). The kernel lock is the only single-instance authority; never rely on pid files.
+- `Type=notify` + `daemon_notify --ready` only after the session is open; `daemon_watchdog_ping` once per cycle. Without `systemd-notify` the template falls back to `Type=simple`.
+- Unit values come from `service_render`: `%` doubled, `$` is NOT escaped, relative/newline/quote/backslash paths refused, no `Documentation=file://` (spaces are invalid there). Overrides go in `config.local.sh` (the service does not inherit the shell env); changing paths or `INTERVAL_SEC` needs `service install` + `restart`.
+- `service start/restart` run `reset-failed` first (a start-limit hit would otherwise block them) and refuse while a hand-started daemon runs.
+- `tests/usermgr.sh` is test infrastructure only (throw-away user + private mount namespace for a real `systemd --user` in a non-systemd container). Never run two suites at once; a leaked daemon after the suite is a bug (signal the REAL daemon pid from `daemon.pid`, not the subshell that launched it). It can't reproduce logind/PAM/desktop sessions: say so honestly.

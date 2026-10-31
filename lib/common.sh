@@ -49,17 +49,21 @@ common_on_err() {
     return 0
 }
 
-# Rotate the diagnostic log when it grows beyond LOG_MAX_BYTES.
-common_rotate_log() {
-    local size
-    if [[ -f ${LOG_FILE:-} ]]; then
-        size=$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)
+# common_rotate_file FILE — when FILE has grown beyond LOG_MAX_BYTES, keep it as FILE.1
+# (one generation) and let the next writer start a fresh one.
+common_rotate_file() {
+    local f=${1-} size
+    if [[ -n $f && -f $f ]]; then
+        size=$(stat -c %s "$f" 2>/dev/null || echo 0)
         if (( size > LOG_MAX_BYTES )); then
-            mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+            mv -f "$f" "$f.1" 2>/dev/null || true
         fi
     fi
     return 0
 }
+
+# Rotate the diagnostic log (cal.log).
+common_rotate_log() { common_rotate_file "${LOG_FILE:-}"; }
 
 # --- Time helpers (all write into the variable named by $1) -------------------
 
