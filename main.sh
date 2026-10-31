@@ -351,10 +351,11 @@ cmd_purge() {
 cmd_doctor() {
     local c bad=0
     echo "Bash     : $BASH_VERSION"
-    for c in ps awk sort cut head flock column df date mktemp; do
+    # Everything the logger actually runs (README: "Technologies"). `column` is NOT required.
+    for c in ps awk sort uniq cut head tail tr grep sed find stat flock df du date mktemp wc sha256sum timeout; do
         if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c"; else echo "  MISSING $c"; bad=1; fi
     done
-    for c in systemctl systemd-notify setsid; do
+    for c in column locale systemctl systemd-notify setsid; do
         if command -v "$c" >/dev/null 2>&1; then echo "  ok      $c (optional)"; else echo "  absent  $c (optional)"; fi
     done
     storage_init && echo "  ok      directories writable" || { echo "  FAIL    directories"; bad=1; }

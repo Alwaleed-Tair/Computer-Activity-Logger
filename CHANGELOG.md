@@ -6,7 +6,7 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com/); ve
 
 Full review of the runtime path (collector → detector → daemon → storage / sessionlog / recovery),
 `main.sh`, `config.sh`, the installer and the systemd unit, against the 12 requested aspects and the
-Bash-style checklist. Regression tests: `tests/test_review.sh` (36 checks; run by `tests/run_all.sh`;
+Bash-style checklist. Regression tests: `tests/test_review.sh` (40 checks; run by `tests/run_all.sh`; the first 36 were verified to FAIL on the pre-review code — 13 of them did) plus one new smoke check.
 verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus one new smoke check.
 
 ### Fixed
@@ -28,6 +28,8 @@ verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus
 | 13 | Child processes | In the `sleep &` fallback, a signal left the `sleep` child behind, holding inherited file descriptors (including the daemon lock). | The child is killed when the wait is interrupted. |
 | 14 | Races | `daemon.pid` was written non-atomically, so `stop`/`status` could read an empty file. | Written to a temp file and renamed. |
 | 15 | UX | `main.sh start` declared failure if the daemon needed more than 1 s to take its lock (slow machine). | Polls up to 5 s. |
+| 16 | Docs vs code | **`doctor` failed (rc 1) when `column` was missing although README calls it optional**, and did not check tools the logger really runs (`find`, `stat`, `timeout`, `sha256sum`…). Found by the acceptance run on a fresh clone. | `doctor` checks the real required set; `column`, `locale`, `systemctl`, `systemd-notify`, `setsid` are reported as optional. |
+| 17 | Permissions | `data/` and `reports/` ship in the git checkout with mode 755, so file names were listable by other users (contents were already 600). Found by the acceptance run. | `storage_init` sets 700 on the default directories inside the project (never on a path chosen with `DATA_DIR=…`). |
 
 ### Reviewed and found correct (no change)
 

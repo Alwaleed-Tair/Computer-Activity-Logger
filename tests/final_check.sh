@@ -80,7 +80,7 @@ check "report verify" "$M" report verify
 check "report daily" "$M" report daily
 check "report list" "$M" report list
 eq "report set = 3 CSVs + manifest" 4 "$(find "$CLONE/reports/period" -name '*.csv' | wc -l)"
-eq "no file in data/state/reports is looser than 600/700" 0 "$(find "$CLONE/data" "$CLONE/state" "$CLONE/reports" \( -type f -a \! -perm 600 \) -o \( -type d -a \! -perm 700 \) | wc -l)"
+eq "no file in data/state/reports is looser than 600/700" 0 "$(find "$CLONE/data" "$CLONE/state" "$CLONE/reports" -name .gitkeep -prune -o \( \( -type f -a \! -perm 600 \) -o \( -type d -a \! -perm 700 \) \) -print | wc -l)"
 eq "git ignores the runtime data (clone stays clean)" "" "$(git -C "$CLONE" status --porcelain | grep -v 'config.local.sh' || true)"
 check "purge --before an old date keeps current data" "$M" purge --before 2000-01-01 --yes
 eq "...rows still there" 1 "$([[ $(grep -c '' "$CLONE/data/processes.csv") -gt 2 ]] && echo 1 || echo 0)"

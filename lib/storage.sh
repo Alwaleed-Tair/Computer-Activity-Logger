@@ -42,8 +42,14 @@ STORAGE_DIRTY=0      # 1 after a failed append: the file may end with a partial 
 
 # Create directories with private permissions.
 storage_init() {
+    local d
     umask 077
-    common_ensure_dir "$DATA_DIR" "$STATE_DIR" "$REPORTS_DIR"
+    common_ensure_dir "$DATA_DIR" "$STATE_DIR" "$REPORTS_DIR" || return 1
+    # data/ and reports/ ship inside the git checkout (mode 755): make OUR default directories private.
+    # Only directories inside the project are touched, never a path chosen through DATA_DIR=…
+    for d in "$DATA_DIR" "$STATE_DIR" "$REPORTS_DIR"; do
+        case $d in "$CAL_ROOT"/*) chmod 700 -- "$d" 2>/dev/null || true ;; esac
+    done
 }
 
 # --- CSV file hygiene ----------------------------------------------------------

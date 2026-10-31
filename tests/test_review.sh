@@ -169,6 +169,19 @@ expect_eq "INTERVAL_SEC=08 is read as 8, not as a broken octal number" 1 "$out"
 out=$(env -u CAL_ROOT LOG_MAX_BYTES=abc "$ROOT/main.sh" doctor 2>&1)
 case $out in *"LOG_MAX_BYTES must be"*) pass "LOG_MAX_BYTES is validated" ;; *) fail "LOG_MAX_BYTES validation" "$out" ;; esac
 
+section "R10. doctor: column is optional; default project directories are private"
+nocol="$SANDBOX/nocol"; mkdir -p "$nocol"
+for f in /usr/bin/* ; do [[ ${f##*/} == column ]] || ln -s "$f" "$nocol/${f##*/}" 2>/dev/null; done
+out=$(PATH="$nocol" /usr/bin/bash "$ROOT/main.sh" doctor 2>&1); rc=$?
+expect_eq "doctor succeeds without column on the PATH (README: optional)" 0 "$rc"
+case $out in *"absent  column (optional)"*) pass "...and reports it as optional" ;; *) fail "column reported as optional" "$out" ;; esac
+d10="$SANDBOX/proj10"; mkdir -p -m 755 "$d10/data"
+( CAL_ROOT="$d10"; DATA_DIR="$d10/data"; STATE_DIR="$d10/state"; REPORTS_DIR="$d10/reports"; storage_init )
+expect_eq "a shipped data/ directory inside the project is tightened to 700" 700 "$(stat -c %a "$d10/data")"
+mkdir -m 755 "$SANDBOX/outside"
+( CAL_ROOT="$d10"; DATA_DIR="$SANDBOX/outside"; STATE_DIR="$d10/state"; REPORTS_DIR="$d10/reports"; storage_init )
+expect_eq "a directory chosen outside the project is NOT chmod-ed" 755 "$(stat -c %a "$SANDBOX/outside")"
+
 # =============================================================================
 printf '\n%d checks, %d failed\n' "$TOTAL" "$FAILS"
 exit $(( FAILS > 0 ))
