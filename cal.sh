@@ -30,7 +30,6 @@ STATE="$DATA/.session"                     # "id start_epoch last_seen_epoch": l
 LOCK="$DATA/.lock"                         # flock: only one logger at a time
 PIDFILE="$DATA/.pid"
 CONSENT="$DATA/.consent"
-UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/cal-logger.service"
 
 [[ $INTERVAL =~ ^[0-9]+$ ]] && (( INTERVAL >= 1 && INTERVAL <= 60 )) || { echo "CAL_INTERVAL must be 1..60" >&2; exit 1; }
 
@@ -61,7 +60,7 @@ nap()    { [[ -n ${NAPFD:-} ]] || exec {NAPFD}<> <(:); read -r -t "$1" -u "$NAPF
 # The background logger (what `start` launches; run it yourself with `./cal.sh run`)
 # =============================================================================
 declare -A T_MONO=() T_EPOCH=() T_NAME=()   # tracked processes, by pid: start (uptime s), start (epoch), name
-SID="" S_EPOCH=0 S_MONO=0 STOP=0 FINISHED=0
+SID="" S_EPOCH=0 STOP=0 FINISHED=0
 
 log_session() {   # log_session ID START END STATUS
     local a b
@@ -121,15 +120,15 @@ finish() {   # runs on exit: save everything that is still open
 run_daemon() {
     local id start last
     mkdir -p -m 700 "$DATA"
-    [[ -e $CONSENT ]] || { echo "No consent recorded: run ./cal.sh start first." >&2; exit 4; }
+    [[ -e $CONSENT ]] || { echo "No consent recorded: run ./cal.sh start first." >&2; exit 1; }
     exec 9>"$LOCK"
-    flock -n 9 || { echo "Another logger is already running." >&2; exit 3; }
+    flock -n 9 || { echo "Another logger is already running." >&2; exit 1; }
     echo $$ >"$PIDFILE"
     new_csv "$SESSIONS" "$SESSIONS_HEADER"; new_csv "$PROCESSES" "$PROCESSES_HEADER"
     if read -r id start last 2>/dev/null <"$STATE" && [[ $start =~ ^[0-9]+$ && $last =~ ^[0-9]+$ ]]; then
         log_session "$id" "$start" "$last" CRASHED       # the previous run died: its end is the last time it was seen
     fi
-    epoch S_EPOCH; uptime_s S_MONO
+    epoch S_EPOCH
     SID="$(printf '%(%Y%m%dT%H%M%SZ)T' "$S_EPOCH")-$$"
     trap 'STOP=1' TERM INT HUP                           # handlers only set a flag (nothing else is safe inside a trap)
     trap finish EXIT
@@ -185,7 +184,7 @@ cmd_status() {
     else
         echo "Stopped."
     fi
-    [[ -e $UNIT ]] && echo "Autostart: on (starts when you log in)." || echo "Autostart: off."
+    grep -qs "# cal-logger" "$HOME/.profile" "$HOME/.bash_profile" && echo "Autostart: on (starts when you log in)." || echo "Autostart: off."
     [[ -s $PROCESSES ]] && echo "Logged so far: $(( $(grep -c '' "$PROCESSES") - 1 )) processes, $(( $(grep -c '' "$SESSIONS") - 1 )) sessions in $DATA"
 }
 
@@ -204,34 +203,17 @@ cmd_report() {
     echo "Excel file: $REPORT"
 }
 
+# Start at login = one line in your login script (~/.profile). `start` does nothing if it is already running.
 cmd_autostart() {
+    local f="$HOME/.profile"; [[ -e $HOME/.bash_profile ]] && f="$HOME/.bash_profile"
     case ${1:-} in
         on)
             [[ -e $CONSENT ]] || { echo "Run ./cal.sh start once first (it asks for your consent)." >&2; exit 1; }
-            case $DIR$DATA in *\"*|*\\*|*$'\n'*|*%*) echo "Unsupported characters in the installation path." >&2; exit 1 ;; esac
-            mkdir -p "${UNIT%/*}"
-            cat >"$UNIT" <<EOF
-[Unit]
-Description=Computer Activity Logger
-ConditionPathExists=$CONSENT
-
-[Service]
-ExecStart="$DIR/cal.sh" run
-Environment="CAL_DATA=$DATA" "CAL_INTERVAL=$INTERVAL"
-Restart=on-failure
-RestartSec=5
-RestartPreventExitStatus=3 4
-TimeoutStopSec=15
-
-[Install]
-WantedBy=default.target
-EOF
-            systemctl --user daemon-reload && systemctl --user enable cal-logger.service || exit 1
-            if running; then echo "Autostart on. (A logger is already running; it keeps running.)"
-            else systemctl --user start cal-logger.service && echo "Autostart on: it runs now and starts at every login." ; fi ;;
+            case $DIR in *[\"\$\`\\]*) echo "Unsupported characters in the installation path." >&2; exit 1 ;; esac
+            grep -qs '# cal-logger' "$f" || printf '"%s/cal.sh" start </dev/null >/dev/null 2>&1   # cal-logger\n' "$DIR" >>"$f"
+            echo "Autostart on: it starts when you log in (line added to $f)." ;;
         off)
-            systemctl --user disable --now cal-logger.service 2>/dev/null
-            rm -f -- "$UNIT"; systemctl --user daemon-reload 2>/dev/null
+            [[ -e $f ]] && sed -i '/# cal-logger$/d' "$f"
             echo "Autostart off." ;;
         *) echo "usage: ./cal.sh autostart on|off" >&2; exit 1 ;;
     esac
@@ -254,7 +236,7 @@ Computer Activity Logger — logs which programs you run and for how long (with 
   ./cal.sh stop         stop (everything is saved)
   ./cal.sh status       is it running?
   ./cal.sh report       summary in the terminal + data/report.csv for Excel
-  ./cal.sh autostart on|off   start automatically when you log in (systemd user service)
+  ./cal.sh autostart on|off   start automatically when you log in (adds one line to ~/.profile)
   ./cal.sh purge        delete all logged data and the consent
 Files: data/sessions.csv, data/processes.csv   Scan interval: CAL_INTERVAL=5 (seconds)
 EOF

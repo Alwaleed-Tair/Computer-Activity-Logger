@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test.sh — tests for cal.sh (sandboxed: uses a temp data dir, never your real data).
-#   bash test.sh            (about 2 minutes; the autostart part needs a systemd user manager and is skipped without one)
+#   bash test.sh            (about 2 minutes)
 set -u -o pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SB="$(mktemp -d)"; mkdir -p "$SB/bin"
@@ -19,7 +19,7 @@ col() { awk -F, -v n="$2" 'NR > 1 { print $n }' "$1"; }         # column n of a 
 row() { grep -a ",$2," "$1" | grep -a "$3" | tail -n 1; }        # row for pid in file matching text
 
 section "1. consent is required"
-"$CAL" run >/dev/null 2>&1; eq "run without consent exits 4" 4 "$?"
+"$CAL" run >/dev/null 2>&1; eq "run without consent is refused (rc 1)" 1 "$?"
 echo no | "$CAL" start >/dev/null 2>&1; eq "answering 'no' starts nothing (rc 1)" 1 "$?"
 eq "...and creates no data files" 0 "$(ls "$CAL_DATA"/*.csv 2>/dev/null | wc -l)"
 
@@ -27,7 +27,7 @@ section "2. start, one instance only"
 echo yes | "$CAL" start >/dev/null; eq "start (answering yes)" 0 "$?"
 out=$("$CAL" status); [[ $out == Running* ]] && pass "status says running" || fail "status says running" "$out"
 out=$("$CAL" start); case $out in "Already running"*) pass "a second start does not start a second logger" ;; *) fail "second start" "$out" ;; esac
-"$CAL" run >/dev/null 2>&1; eq "a second 'run' is refused with exit 3" 3 "$?"
+"$CAL" run >/dev/null 2>&1; eq "a second run is refused (rc 1)" 1 "$?"
 eq "exactly one logger process" 1 "$(pgrep -fc "^bash $CAL run\$")"
 
 section "3. real programs: concurrent, odd names, killed, left running"
@@ -85,28 +85,20 @@ section "7. purge"
 "$CAL" purge </dev/null >/dev/null 2>&1; [[ -e $S ]] && pass "purge without 'yes' deletes nothing" || fail "purge cancelled"
 echo yes | "$CAL" purge >/dev/null; [[ ! -e $S && ! -e $CAL_DATA/.consent ]] && pass "purge deletes data and consent" || fail "purge"
 
-section "8. autostart (real systemd user manager)"
-# shellcheck source=/dev/null
-source "$ROOT/tests/usermgr.sh"
-if ! um_detect; then echo "  SKIP  $UM_WHY"
-elif ! um_setup "$SB"; then fail "start a systemd user manager" "$(tail -n 3 "$UM_LOG")"
-else
-    um_cleanup_later() { um_cleanup; }; trap 'um_cleanup; cleanup' EXIT
-    H="$UM_HOME/cal"; mkdir -p "$H"; cp "$ROOT/cal.sh" "$H/"; [[ $UM_MODE == private ]] && chown -R "$UM_USER" "$H"
-    U() { um_run env -u CAL_DATA CAL_INTERVAL=1 "$@"; }
-    echo yes | U "$H/cal.sh" start >/dev/null; U "$H/cal.sh" stop >/dev/null
-    U "$H/cal.sh" autostart on >/dev/null; eq "autostart on: service active" active "$(um_ctl is-active cal-logger.service)"
-    eq "...and enabled" enabled "$(um_ctl is-enabled cal-logger.service)"
-    um_stop_manager; eq "logout: no logger left" 0 "$(pgrep -fc "^bash $H/cal.sh run\$")"
-    um_start_manager; for i in $(seq 40); do [[ $(um_ctl is-active cal-logger.service) == active ]] && break; sleep 0.5; done
-    eq "login: it starts by itself" active "$(um_ctl is-active cal-logger.service)"
-    eq "...and only one logger runs" 1 "$(pgrep -fc "^bash $H/cal.sh run\$")"
-    sid=$(<"$H/data/.pid"); U kill -KILL "$sid"; for i in $(seq 40); do sleep 0.5; [[ $(um_ctl is-active cal-logger.service) == active && $(<"$H/data/.pid") != "$sid" ]] && break; done
-    eq "after kill -9 systemd restarts it" active "$(um_ctl is-active cal-logger.service)"
-    U "$H/cal.sh" autostart off >/dev/null; eq "autostart off: stopped" inactive "$(um_ctl is-active cal-logger.service)"
-    eq "...unit removed" 0 "$([[ -e $UM_HOME/.config/systemd/user/cal-logger.service ]] && echo 1 || echo 0)"
-    eq "sessions closed properly (none lost): COMPLETED/CRASHED only" 0 "$(grep -vc -E ',(COMPLETED|CRASHED)$|Session,User' "$H/data/sessions.csv")"
-fi
+section "8. autostart at login (one line in ~/.profile)"
+H="$SB/home"; mkdir -p "$H"; printf 'export KEEP_ME=1\n' >"$H/.profile"
+echo yes | "$CAL" start >/dev/null; "$CAL" stop >/dev/null
+HOME=$H "$CAL" autostart on >/dev/null
+eq "autostart on adds exactly one line" 1 "$(grep -c '# cal-logger' "$H/.profile")"
+HOME=$H "$CAL" autostart on >/dev/null; eq "...and doing it twice does not add another" 1 "$(grep -c '# cal-logger' "$H/.profile")"
+HOME=$H bash -l -c true; sleep 2
+out=$("$CAL" status); [[ $out == Running* ]] && pass "logging in (a login shell) starts the logger by itself" || fail "login shell start" "$out"
+HOME=$H bash -l -c true; sleep 1
+eq "a second login does not start a second logger" 1 "$(pgrep -fc "^bash $CAL run\$")"
+"$CAL" stop >/dev/null
+HOME=$H "$CAL" autostart off >/dev/null
+eq "autostart off removes the line" 0 "$(grep -c '# cal-logger' "$H/.profile")"
+eq "...and leaves your own lines alone" "export KEEP_ME=1" "$(cat "$H/.profile")"
 
 printf '\n%d checks, %d failed\n' "$TOTAL" "$FAILS"
 exit $((FAILS > 0))

@@ -14,7 +14,7 @@ Reply to the user in **Arabic** (Gulf dialect is fine); keep code, comments, com
 - Per-user, no root. Files 600, directory 700 (`umask 077`). All stored times UTC (`export TZ=UTC`).
 
 ## Layout
-`cal.sh` (everything) · `test.sh` (tests, sandboxed via `CAL_DATA`) · `tests/usermgr.sh` (helper: a real `systemd --user` manager for the autostart tests in a container) · `README.md` · `CHANGELOG.md`.
+`cal.sh` (everything) · `test.sh` (tests, sandboxed via `CAL_DATA` and a temp HOME) · `README.md` · `CHANGELOG.md`. Autostart = one marked line in `~/.profile` (no systemd).
 
 ## Commands
 `bash test.sh` (~2 min, never touches real data). Run only one test suite at a time (the logger sees the other's processes).

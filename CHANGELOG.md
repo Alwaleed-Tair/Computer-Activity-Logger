@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1 — even simpler
+Autostart is now one line in `~/.profile` (`./cal.sh autostart on|off`) instead of a systemd user service; removed `tests/usermgr.sh`
+(the fake-systemd test infrastructure) and the exit codes 3/4. Lost: automatic restart after a crash (the next login restarts it; the
+broken session is closed as `CRASHED`). `cal.sh` 255 lines, `test.sh` 5 sections of plain Bash.
+
 ## 0.7.0 — simplified rewrite
 The whole project is now one script, `cal.sh` (~270 lines), one test file, `test.sh`, and a README.
 Kept: consent, background logging of sessions and processes (PID + start time identity, monotonic durations),
