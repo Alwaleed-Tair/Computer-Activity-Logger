@@ -1,12 +1,2 @@
-# Runtime data — never commit logs or reports (they describe a user's activity)
-data/*
-reports/*
-state/
-!data/.gitkeep
-!reports/.gitkeep
-
-# Local, per-user files
-.consent
-config.local.sh
-conf/ignore.list
-conf/apps.map
+# runtime data (describes your activity): never commit
+data/
