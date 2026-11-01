@@ -84,7 +84,7 @@ R_PID=70001; R_PPID=1; R_START_MONO=$(( UP - 30 )); R_START_EPOCH=$(( NOW - 30 )
 R_PAUSED=0; R_PRE=no; R_SESSION=$SESSION_ID; R_CLASS=Background_Process; R_CAT=background; R_GROUP=g; R_ROOT=yes; R_APP=lostapp; R_CMD=lostapp; R_COMM=lostapp
 record_pack
 ENDED=("0"$'\t'"0"$'\t'"0"$'\t'"$REPLY")          # ended in the cycle that got cut short
-daemon_finalize
+( daemon_finalize )       # in a subshell: it runs `trap "" TERM`, which child processes (the daemons started later) would inherit as "ignore TERM"
 expect_eq "the ended process was written (COMPLETED)" 1 "$(grep -c '"lostapp".*COMPLETED$' "$PROCESSES_FILE")"
 expect_eq "its session was closed" 0 "$(grep -c ',ACTIVE$' "$SESSIONS_FILE")"
 
@@ -211,6 +211,25 @@ cp "$(command -v bash)" "$SANDBOX/bin/calren"
 sleep 14; "$MAIN" stop >/dev/null 2>&1
 rr=$(grep -a ",$rp," "$PROCESSES_FILE" | tail -n 1)
 expect_eq "end-to-end: the row of the renamed process has the latest name" 1 "$(grep -c ',\"late\",' <<<"$rr")"
+
+section "R12. start/stop do not spawn an external sleep (found by the user's own run: the logger recorded main.sh start's helper `sleep` as a user application)"
+shim="$SANDBOX/shim"; mkdir -p "$shim"; real_sleep=$(command -v sleep)
+printf '#!/bin/sh\necho "$PPID $*" >> "%s/calls"\nexec %s "$@"\n' "$SANDBOX" "$real_sleep" > "$shim/sleep"; chmod +x "$shim/sleep"; rm -f "$SANDBOX/calls"
+DATA_DIR="$SANDBOX/data"; STATE_DIR="$SANDBOX/state"
+PATH="$shim:$PATH" "$MAIN" start >/dev/null 2>&1; sleep 2
+PATH="$shim:$PATH" "$MAIN" stop >/dev/null 2>&1
+expect_eq "main.sh start + stop called the external sleep 0 times" 0 "$(cat "$SANDBOX/calls" 2>/dev/null | grep -c . || true)"
+
+section "R13. 24 stop cycles under load: the daemon never aborts in its signal handler (regression of review fix 11: timeout inside the TERM trap made bash abort with a longjmp error in about 1 stop of 8)"
+r13="$SANDBOX/r13"; mkdir -p "$r13"
+export DATA_DIR="$r13/d" STATE_DIR="$r13/s"
+PROCESSES_FILE="$DATA_DIR/processes.csv"; SESSIONS_FILE="$DATA_DIR/sessions.csv"; LOG_FILE="$STATE_DIR/cal.log"
+for i in $(seq 1 24); do
+    "$MAIN" start >/dev/null 2>&1; sleep 1; sleep 2 & sleep 2 & sleep 2 & wait; sleep 1; "$MAIN" stop >/dev/null 2>&1
+done
+expect_eq "no bash abort (longjmp) in 24 stops" 0 "$(grep -c longjmp "$STATE_DIR/cal.log" 2>/dev/null || true)"
+expect_eq "all 24 sessions ended COMPLETED (none CRASHED)" 24 "$(grep -c ',COMPLETED$' "$SESSIONS_FILE" 2>/dev/null || true)"
+expect_eq "...and the stop reason is still logged" 24 "$(grep -c 'reason=logout' "$STATE_DIR/cal.log" 2>/dev/null || true)"
 
 # =============================================================================
 printf '\n%d checks, %d failed\n' "$TOTAL" "$FAILS"

@@ -12,6 +12,7 @@
 DAEMON_STOP=0
 DAEMON_FINALIZED=0
 DAEMON_EXIT_REASON=error_exit   # replaced when we are stopped by a signal
+DAEMON_SIGNALLED=0               # 1 once TERM/INT/HUP arrived
 DAEMON_LAST_UP=0
 DAEMON_CYCLES=0
 DAEMON_LOCK_FD=""
@@ -76,15 +77,13 @@ daemon_is_running() {
 
 # --- Signals -----------------------------------------------------------------
 
-# TERM/INT/HUP: ask the loop to stop; decide whether this is a system shutdown.
+# TERM/INT/HUP: ask the loop to stop. NOTHING else runs here: starting a child process (even `timeout`)
+# inside a trap that interrupts `read -t` made bash 5.2 abort with "longjmp causes uninitialized stack
+# frame" in about 1 stop out of 4 under load (found by the smoke test; tests/test_review.sh R13).
+# Whether this is a machine shutdown is decided later, in daemon_finalize, outside the signal handler.
 daemon_on_stop() {
     DAEMON_STOP=1
-    # `timeout`: a wedged D-Bus must never delay the stop (systemd would SIGKILL us after TimeoutStopSec).
-    if [[ $(timeout 2 systemctl is-system-running 2>/dev/null) == stopping ]]; then
-        DAEMON_EXIT_REASON=shutdown
-    else
-        DAEMON_EXIT_REASON=logout
-    fi
+    DAEMON_SIGNALLED=1
 }
 
 # USR1: persist state immediately (useful before inspecting files).
@@ -158,6 +157,11 @@ daemon_finalize() {
     if (( DAEMON_FINALIZED == 1 )); then return 0; fi
     DAEMON_FINALIZED=1
     trap '' TERM INT HUP USR1
+    if (( DAEMON_SIGNALLED == 1 )); then
+        # Stopped by a signal: machine shutdown or just logout? Only the log line differs (both are COMPLETED).
+        # `timeout`: a wedged D-Bus must never delay the stop.
+        if [[ $(timeout 2 systemctl is-system-running 2>/dev/null) == stopping ]]; then DAEMON_EXIT_REASON=shutdown; else DAEMON_EXIT_REASON=logout; fi
+    fi
     daemon_notify --stopping "--status=saving the open session and processes"
     common_uptime up
     common_now_epoch now

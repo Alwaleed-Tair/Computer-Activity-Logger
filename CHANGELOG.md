@@ -6,7 +6,7 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com/); ve
 
 Full review of the runtime path (collector → detector → daemon → storage / sessionlog / recovery),
 `main.sh`, `config.sh`, the installer and the systemd unit, against the 12 requested aspects and the
-Bash-style checklist. Regression tests: `tests/test_review.sh` (46 checks; run by `tests/run_all.sh`; the first 36 were verified to FAIL on the pre-review code — 13 of them did) plus one new smoke check.
+Bash-style checklist. Regression tests: `tests/test_review.sh` (50 checks; run by `tests/run_all.sh`; the first 36 were verified to FAIL on the pre-review code — 13 of them did) plus one new smoke check.
 verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus one new smoke check.
 
 ### Fixed
@@ -23,7 +23,7 @@ verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus
 | 8 | Permissions | CSV files created by an older version/umask stayed group/world-readable forever. | `storage_prepare_csv` / `_sessionlog_prepare` re-secure our own CSV files to `600`. |
 | 9 | Security | `config.local.sh` is **sourced as code**; a group/world-writable copy would let another user run commands as you. | Ignored (with a message) unless owned by you and not group/world-writable. |
 | 10 | Config | `INTERVAL_SEC=08` passed the digit check and then failed as an invalid octal number in arithmetic; `LOG_MAX_BYTES` was never validated. | Numeric settings are normalised with `10#`; `LOG_MAX_BYTES` validated. |
-| 11 | Stop path | `daemon_on_stop` ran `systemctl is-system-running` without a time limit; a wedged D-Bus could delay the stop past `TimeoutStopSec`. | `timeout 2`. |
+| 11 | Stop path | `daemon_on_stop` ran `systemctl is-system-running` inside the TERM trap without a time limit. **My first fix (`timeout 2` in the trap) was itself a regression:** starting a child process inside the trap that interrupts `read -t` made bash 5.2 abort with "longjmp causes uninitialized stack frame" in roughly 1 stop of 8 (the session ended `CRASHED` instead of `COMPLETED`). Caught by the smoke test, which failed 3/10 runs on that code. | The trap now only sets flags; shutdown-vs-logout is decided in `daemon_finalize` (outside the handler, with `timeout 2`). Test R13 (24 stops under load; fails on the regressed code, passes on the fix). |
 | 12 | CPU / child processes | Under the service, `systemd-notify` was forked **every scan** for the watchdog. | Ping every `WatchdogSec/4` (a hung loop is still caught within `WatchdogSec`). |
 | 13 | Child processes | In the `sleep &` fallback, a signal left the `sleep` child behind, holding inherited file descriptors (including the daemon lock). | The child is killed when the wait is interrupted. |
 | 14 | Races | `daemon.pid` was written non-atomically, so `stop`/`status` could read an empty file. | Written to a temp file and renamed. |
@@ -32,6 +32,7 @@ verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus
 | 17 | Permissions | `data/` and `reports/` ship in the git checkout with mode 755, so file names were listable by other users (contents were already 600). Found by the acceptance run. | `storage_init` sets 700 on the default directories inside the project (never on a path chosen with `DATA_DIR=…`). |
 | 18 | Data accuracy | **A process that renames itself was stored under whichever name it had at the instant of its first scan** (Chrome's main process: `chromium` right after exec, `chrome` a few ms later). Found by the independent QA run (`QA_REPORT.md`). | The detector keeps the latest name of a tracked process and re-saves `active.tsv` when it changes. Test R11 (unit + a real self-renaming process). |
 | 19 | UX | `install.sh` printed "Next: run service enable / start" after having done both. | `CAL_FROM_INSTALLER` silences those hints. |
+| 20 | Data accuracy / self-noise | `./main.sh start` and `stop` used an external `sleep 0.2` for polling; the logger sometimes caught that helper and recorded it as a "User_Application sleep" (found by the user's own WSL run: pids 1441 and 2049). | `start`/`stop` wait with the builtin `common_sleep`. Test R12 (a `sleep` shim in PATH must see 0 calls). |
 
 ### Reviewed and found correct (no change)
 

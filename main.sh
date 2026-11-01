@@ -137,10 +137,11 @@ cmd_start() {
     else
         nohup "$CAL_ROOT/main.sh" daemon >>"$LOG_FILE" 2>&1 </dev/null &
     fi
+    common_sleep_init      # after the launch (the daemon must not inherit it); no external `sleep`: the logger would record it
     # Poll (up to 5 s): on a loaded machine the daemon needs more than a second to take its lock.
     for (( i = 0; i < 25; i++ )); do
         if daemon_is_running; then break; fi
-        sleep 0.2
+        common_sleep 0.2
     done
     if daemon_is_running; then echo "Started (pid $(cat "$PID_FILE" 2>/dev/null))."; else
         main_die "failed to start — see $LOG_FILE"; fi
@@ -148,12 +149,13 @@ cmd_start() {
 
 cmd_stop() {
     local pid i tries=$(( STOP_TIMEOUT_SEC * 5 ))
+    common_sleep_init      # builtin waiting: an external `sleep` here would be logged as a "process" by the logger itself
     if ! daemon_is_running; then echo "Not running."; return 0; fi
     pid=$(cat "$PID_FILE" 2>/dev/null) || main_die "pid file missing"
     kill -TERM "$pid" 2>/dev/null || main_die "cannot signal pid $pid"
     for (( i = 0; i < tries; i++ )); do
         if ! daemon_is_running; then echo "Stopped."; return 0; fi
-        sleep 0.2
+        common_sleep 0.2
     done
     # A stuck monitor must never be unstoppable. SIGKILL is safe: recovery finishes the
     # session and the tracked processes at the next start (status CRASHED / RECOVERED).
@@ -161,7 +163,7 @@ cmd_stop() {
     kill -KILL "$pid" 2>/dev/null || true
     for (( i = 0; i < 25; i++ )); do
         if ! daemon_is_running; then echo "Stopped (forced)."; return 0; fi
-        sleep 0.2
+        common_sleep 0.2
     done
     main_die "daemon (pid $pid) could not be stopped"
 }

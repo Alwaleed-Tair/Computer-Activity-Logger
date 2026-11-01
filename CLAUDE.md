@@ -130,3 +130,10 @@ Tests run against a temp sandbox via env overrides (`DATA_DIR`, `STATE_DIR`, `CO
 - Unit values come from `service_render`: `%` doubled, `$` is NOT escaped, relative/newline/quote/backslash paths refused, no `Documentation=file://` (spaces are invalid there). Overrides go in `config.local.sh` (the service does not inherit the shell env); changing paths or `INTERVAL_SEC` needs `service install` + `restart`.
 - `service start/restart` run `reset-failed` first (a start-limit hit would otherwise block them) and refuse while a hand-started daemon runs.
 - `tests/usermgr.sh` is test infrastructure only (throw-away user + private mount namespace for a real `systemd --user` in a non-systemd container). Never run two suites at once; a leaked daemon after the suite is a bug (signal the REAL daemon pid from `daemon.pid`, not the subshell that launched it). It can't reproduce logind/PAM/desktop sessions: say so honestly.
+
+## Signal-handler and test-harness rules (found the hard way in v0.6.1)
+
+- **Never start a child process (not even `timeout`, `systemctl`, `$(…)`) inside a `trap` handler that can interrupt `read -t`** (`common_sleep`): bash 5.2 aborted with "longjmp causes uninitialized stack frame" in ~1 stop of 8. Handlers only set flags; do the work after the loop / in `daemon_finalize`. `tests/test_review.sh` R13 holds the regression (24 stops under load).
+- **Never call `daemon_finalize` (or anything that runs `trap '' TERM …`) in the test shell itself:** the "ignore" disposition is inherited by every daemon the test starts later, which then ignores SIGTERM and gets SIGKILLed by `stop` after `STOP_TIMEOUT_SEC`. Wrap it in a subshell.
+- `main.sh start/stop` must not run external `sleep` (the logger records it as a process): use `common_sleep`.
+- An intermittent smoke failure is a real bug until proven otherwise: reproduce it with a copy of each candidate version, 10+ runs each, before deciding the cause (it was `timeout` in the trap, not the change being tested).
