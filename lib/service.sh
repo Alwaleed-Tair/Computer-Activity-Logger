@@ -141,7 +141,10 @@ service_install() {
         echo "Note: no systemd user manager is reachable now ($SVC_WHY)."
         echo "The file is in place and will be picked up by your user manager at your next login."
     fi
-    echo "Next: './main.sh service enable' (start automatically at login) and './main.sh service start'."
+    # install.sh runs enable + start itself: do not tell the user to type them again.
+    if [[ -z ${CAL_FROM_INSTALLER:-} ]]; then
+        echo "Next: './main.sh service enable' (start automatically at login) and './main.sh service start'."
+    fi
 }
 
 service_uninstall() {
@@ -168,7 +171,7 @@ service_enable() {
     if ! _svc_installed; then echo "The service is not installed. Run: ./main.sh service install" >&2; return 1; fi
     _svc_ctl enable "$SERVICE_NAME.service" || return 1
     echo "Enabled: it will start whenever your systemd user manager starts (your login)."
-    echo "It is not running yet in this session: './main.sh service start'."
+    if [[ -z ${CAL_FROM_INSTALLER:-} ]]; then echo "It is not running yet in this session: './main.sh service start'."; fi
 }
 
 service_disable() {

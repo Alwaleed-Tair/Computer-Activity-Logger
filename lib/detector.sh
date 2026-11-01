@@ -32,6 +32,8 @@
 declare -gA ACTIVE=()          # pid -> record
 declare -gA ACTIVE_START=()    # pid -> start_mono (fast identity check)
 declare -gA MET_CPU=() MET_RSS=() MET_PEAK=()   # pid -> last CPU s / last RSS / peak RSS (KiB)
+declare -gA MET_COMM=()        # pid -> process name as last stored in its record (a process may rename itself)
+DETECTOR_RENAMED=0             # 1 when a scan changed a record (name change): the daemon then re-saves active.tsv
 declare -ga STARTED=()         # pids that appeared this scan
 declare -ga ENDED=()           # finished: "cpu<TAB>rss<TAB>peak<TAB>record"
 declare -gA IGNORE=()          # comm -> 1   (conf/ignore.list)
@@ -206,13 +208,14 @@ detector_track_record() {
     MET_CPU[$pid]=${CUR_CPU[$pid]:-0}
     MET_RSS[$pid]=${CUR_RSS[$pid]:-0}
     MET_PEAK[$pid]=${CUR_RSS[$pid]:-0}
+    MET_COMM[$pid]=$R_COMM
 }
 
 # _det_finish PID — move a tracked process to ENDED (with its last metrics).
 _det_finish() {
     local pid=$1
     ENDED+=("${MET_CPU[$pid]:-0}"$'\t'"${MET_RSS[$pid]:-0}"$'\t'"${MET_PEAK[$pid]:-0}"$'\t'"${ACTIVE[$pid]}")
-    unset 'ACTIVE[$pid]' 'ACTIVE_START[$pid]' 'MET_CPU[$pid]' 'MET_RSS[$pid]' 'MET_PEAK[$pid]'
+    unset 'ACTIVE[$pid]' 'ACTIVE_START[$pid]' 'MET_CPU[$pid]' 'MET_RSS[$pid]' 'MET_PEAK[$pid]' 'MET_COMM[$pid]'
 }
 
 # _det_new_record PID — build, classify and track a newly seen process. Parents
@@ -259,7 +262,7 @@ _det_new_record() {
 # detector_diff — compare CUR_* with ACTIVE; update ACTIVE, STARTED, ENDED.
 detector_diff() {
     local pid p n rss
-    STARTED=(); ENDED=()
+    STARTED=(); ENDED=(); DETECTOR_RENAMED=0
 
     # 1) Finished: tracked but gone — or the PID now belongs to a different process.
     #    Still running: refresh CPU / memory.
@@ -271,6 +274,12 @@ detector_diff() {
             rss=${CUR_RSS[$pid]:-0}
             MET_RSS[$pid]=$rss
             if (( rss > ${MET_PEAK[$pid]:-0} )); then MET_PEAK[$pid]=$rss; fi
+            # A process can rename itself after exec (Chrome: "chromium" -> "chrome" within ms): keep the
+            # latest name, so the stored name does not depend on the instant of the first scan.
+            if [[ -n ${CUR_COMM[$pid]:-} && ${CUR_COMM[$pid]} != "${MET_COMM[$pid]:-}" ]]; then
+                record_unpack "${ACTIVE[$pid]}"; R_COMM=${CUR_COMM[$pid]}; record_pack
+                ACTIVE[$pid]=$REPLY; MET_COMM[$pid]=$R_COMM; DETECTOR_RENAMED=1
+            fi
         fi
     done
 

@@ -6,7 +6,7 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com/); ve
 
 Full review of the runtime path (collector → detector → daemon → storage / sessionlog / recovery),
 `main.sh`, `config.sh`, the installer and the systemd unit, against the 12 requested aspects and the
-Bash-style checklist. Regression tests: `tests/test_review.sh` (40 checks; run by `tests/run_all.sh`; the first 36 were verified to FAIL on the pre-review code — 13 of them did) plus one new smoke check.
+Bash-style checklist. Regression tests: `tests/test_review.sh` (46 checks; run by `tests/run_all.sh`; the first 36 were verified to FAIL on the pre-review code — 13 of them did) plus one new smoke check.
 verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus one new smoke check.
 
 ### Fixed
@@ -30,6 +30,8 @@ verified to FAIL on the pre-review code — 13 of the 36 checks fail there) plus
 | 15 | UX | `main.sh start` declared failure if the daemon needed more than 1 s to take its lock (slow machine). | Polls up to 5 s. |
 | 16 | Docs vs code | **`doctor` failed (rc 1) when `column` was missing although README calls it optional**, and did not check tools the logger really runs (`find`, `stat`, `timeout`, `sha256sum`…). Found by the acceptance run on a fresh clone. | `doctor` checks the real required set; `column`, `locale`, `systemctl`, `systemd-notify`, `setsid` are reported as optional. |
 | 17 | Permissions | `data/` and `reports/` ship in the git checkout with mode 755, so file names were listable by other users (contents were already 600). Found by the acceptance run. | `storage_init` sets 700 on the default directories inside the project (never on a path chosen with `DATA_DIR=…`). |
+| 18 | Data accuracy | **A process that renames itself was stored under whichever name it had at the instant of its first scan** (Chrome's main process: `chromium` right after exec, `chrome` a few ms later). Found by the independent QA run (`QA_REPORT.md`). | The detector keeps the latest name of a tracked process and re-saves `active.tsv` when it changes. Test R11 (unit + a real self-renaming process). |
+| 19 | UX | `install.sh` printed "Next: run service enable / start" after having done both. | `CAL_FROM_INSTALLER` silences those hints. |
 
 ### Reviewed and found correct (no change)
 

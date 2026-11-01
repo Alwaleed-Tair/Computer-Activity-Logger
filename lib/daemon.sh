@@ -136,7 +136,7 @@ daemon_cycle() {
 
     detector_diff
     daemon_flush_ended "$up" "$now" COMPLETED
-    if (( ${#STARTED[@]} > 0 )) || (( ${#ENDED[@]} > 0 )) || [[ ! -f $ACTIVE_FILE ]]; then
+    if (( ${#STARTED[@]} > 0 )) || (( ${#ENDED[@]} > 0 )) || (( DETECTOR_RENAMED == 1 )) || [[ ! -f $ACTIVE_FILE ]]; then
         storage_save_active || log_warn "cannot save $ACTIVE_FILE"
     fi
     storage_write_heartbeat "$now" "$up" "$SESSION_BOOT" "$SESSION_ID" \

@@ -182,6 +182,36 @@ mkdir -m 755 "$SANDBOX/outside"
 ( CAL_ROOT="$d10"; DATA_DIR="$SANDBOX/outside"; STATE_DIR="$d10/state"; REPORTS_DIR="$d10/reports"; storage_init )
 expect_eq "a directory chosen outside the project is NOT chmod-ed" 755 "$(stat -c %a "$SANDBOX/outside")"
 
+section "R11. a process that renames itself is stored under its latest name (found by QA: Chrome's main process was stored as 'chromium' or 'chrome' depending on the instant of the first scan)"
+ACTIVE=(); ACTIVE_START=(); MET_COMM=(); MET_CPU=(); MET_RSS=(); MET_PEAK=(); ENDED=()
+CUR_START=([81001]=500); CUR_ETIMES=([81001]=1); CUR_PPID=([81001]=1); CUR_TTY=([81001]="?"); CUR_USER=([81001]=tester)
+CUR_COMM=([81001]=chromium); CUR_CPU=([81001]=0); CUR_RSS=([81001]=1000); _OWN=()
+DETECTOR_FIRST_CYCLE=0; IGNORE=(); SESSION_ID=R11
+COLLECTOR_EPOCH=$(date +%s); COLLECTOR_UPTIME=501
+detector_diff
+record_unpack "${ACTIVE[81001]:-}"
+expect_eq "first scan stores the name seen at that instant" chromium "${R_COMM:-}"
+CUR_COMM[81001]=chrome
+detector_diff
+record_unpack "${ACTIVE[81001]}"
+expect_eq "a later scan updates the stored name" chrome "$R_COMM"
+expect_eq "...and flags the state for saving" 1 "$DETECTOR_RENAMED"
+detector_diff
+expect_eq "an unchanged name does not re-flag" 0 "$DETECTOR_RENAMED"
+unset 'CUR_START[81001]' 'CUR_COMM[81001]'
+detector_diff
+ended_unpack "${ENDED[0]:-}"
+expect_eq "the finished row carries the latest name" chrome "${R_COMM:-}"
+
+# real daemon, real renaming process (a copy of bash that renames itself after 7 s)
+DATA_DIR="$SANDBOX/data"; STATE_DIR="$SANDBOX/state"; PROCESSES_FILE="$DATA_DIR/processes.csv"
+cp "$(command -v bash)" "$SANDBOX/bin/calren"
+"$MAIN" start >/dev/null 2>&1; sleep 2
+"$SANDBOX/bin/calren" -c 'sleep 0.5; printf late > /proc/$$/comm; sleep 8; :' & KIDS+=("$!"); rp=$!
+sleep 14; "$MAIN" stop >/dev/null 2>&1
+rr=$(grep -a ",$rp," "$PROCESSES_FILE" | tail -n 1)
+expect_eq "end-to-end: the row of the renamed process has the latest name" 1 "$(grep -c ',\"late\",' <<<"$rr")"
+
 # =============================================================================
 printf '\n%d checks, %d failed\n' "$TOTAL" "$FAILS"
 exit $(( FAILS > 0 ))

@@ -17,6 +17,7 @@ set -u -o pipefail
 INSTALL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 export CAL_ROOT="${INSTALL_DIR%/install}"
 MAIN="$CAL_ROOT/main.sh"
+export CAL_FROM_INSTALLER=1     # lets `main.sh service …` skip its "next, type …" hints
 
 usage() {
     echo "Usage: install/install.sh [--accept] [--with-daily-reports]"
